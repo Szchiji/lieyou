@@ -63,7 +63,6 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"用户 {user_id} 正在尝试狩猎猎物ID: {prey_id}")
     try:
         with get_db_cursor() as cur:
-            # 检查猎物是否存在且属于该用户
             cur.execute(
                 "SELECT name FROM prey WHERE id = %s AND owner_id = %s AND is_hunted = FALSE",
                 (prey_id, user_id)
@@ -76,13 +75,11 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             prey_name = prey[0]
 
-            # 标记猎物为已狩猎
             cur.execute(
                 "UPDATE prey SET is_hunted = TRUE, hunted_at = CURRENT_TIMESTAMP WHERE id = %s",
                 (prey_id,)
             )
 
-            # 增加用户声望
             cur.execute(
                 "UPDATE users SET reputation = reputation + 1 WHERE id = %s RETURNING reputation",
                 (user_id,)
