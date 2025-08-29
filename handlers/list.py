@@ -6,6 +6,7 @@ from psycopg2.extras import DictCursor
 
 from database import get_conn, put_conn
 from constants import CALLBACK_LIST_PREFIX, TYPE_HUNT, TYPE_TRAP
+from handlers.decorators import restricted_to_group
 
 ITEMS_PER_PAGE = 5
 
@@ -23,6 +24,7 @@ def format_time_ago(dt: datetime):
     days = hours / 24
     return f"{int(days)}天前"
 
+@restricted_to_group
 async def list_prey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     page = 1
@@ -98,9 +100,3 @@ async def list_prey(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(list_text, reply_markup=reply_markup, parse_mode='Markdown')
     finally:
         put_conn(conn)
-# ... (其他导入) ...
-from handlers.decorators import restricted_to_group
-
-@restricted_to_group
-async def list_prey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (函数内部代码保持不变) ...
