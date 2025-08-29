@@ -1,40 +1,98 @@
 from telegram import Update
 from telegram.ext import ContextTypes
+from database import db_cursor
+import logging
 
-from database import get_conn, put_conn
-from handlers.decorators import admin_only
+logger = logging.getLogger(__name__)
 
-@admin_only
-async def set_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    管理员命令：手动设置用户的声望。
-    用法: /setrep <声望值> (回复一个用户的消息)
-    """
-    if not update.message.reply_to_message:
-        await update.message.reply_text("请回复一个用户的消息来使用此命令。")
+async def check_admin(user_id: int) -> bool:
+    """检查用户是否为管理员。"""
+    with db_cursor() as cur:
+        cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
+        result = cur.fetchone()
+        return result and result['is_admin']
+
+async def set_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """将用户设置为管理员（仅能由已有管理员操作）。"""
+    user = update.effective_user
+    if not await check_admin(user.id):
+        await update.message.reply_text("你没有权限执行此操作。")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("用法: /setadmin <user_id>")
         return
         
     try:
-        args = context.args
-        if len(args) != 1:
-            await update.message.reply_text("用法: /setrep <声望值>")
-            return
-            
-        new_rep = int(args[0])
-        target_user = update.message.reply_to_message.from_user
+        target_id = int(context.args[0])
+        with db_cursor() as cur:
+            cur.execute("UPDATE users SET is_admin = TRUE WHERE id = %s", (target_id,))
+        await update.message.reply_text(f"用户 {target_id} 已被设为管理员。")
+    except (ValueError, IndexError):
+        await update.message.reply_text("请输入有效的用户ID。")
+
+async def list_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """列出所有系统预设标签。"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("你没有权限执行此操作。")
+        return
+
+    with db_cursor() as cur:
+        cur.execute("SELECT tag_text, tag_type FROM tags ORDER BY tag_type, tag_text")
+        tags = cur.fetchall()
         
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                # 确保用户存在
-                cur.execute("INSERT INTO users (id, username, first_name) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING", (target_user.id, target_user.username, target_user.first_name))
-                cur.execute("UPDATE users SET reputation = %s WHERE id = %s", (new_rep, target_user.id))
-                conn.commit()
-                await update.message.reply_text(f"已将 @{target_user.username} 的声望设置为 {new_rep}。")
-        finally:
-            put_conn(conn)
+        upvote_tags = [t['tag_text'] for t in tags if t['tag_type'] == 1]
+        downvote_tags = [t['tag_text'] for t in tags if t['tag_type'] == -1]
+        
+        text = "👍 **推荐标签**:\n" + ", ".join(upvote_tags) + "\n\n"
+        text += "👎 **拉黑标签**:\n" + ", ".join(downvote_tags)
+        
+        await update.message.reply_text(text)
+
+async def add_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """添加一个新的预设标签。"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("你没有权限执行此操作。")
+        return
+
+    try:
+        tag_type_str = context.args[0].lower()
+        tag_text = " ".join(context.args[1:])
+        
+        if tag_type_str not in ['推荐', 'up', '拉黑', 'down']:
+            raise ValueError("类型错误")
+        if not tag_text:
+            raise ValueError("文本为空")
             
+        tag_type = 1 if tag_type_str in ['推荐', 'up'] else -1
+        
+        with db_cursor() as cur:
+            cur.execute(
+                "INSERT INTO tags (tag_text, tag_type) VALUES (%s, %s)",
+                (tag_text, tag_type)
+            )
+        await update.message.reply_text(f"标签 '{tag_text}' 已成功添加。")
+        
     except (IndexError, ValueError):
-        await update.message.reply_text("请输入一个有效的声望数值。")
-    except Exception as e:
-        await update.message.reply_text(f"发生错误: {e}")
+        await update.message.reply_text("用法: /addtag <推荐|拉黑> <标签文本>")
+
+async def remove_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """移除一个预设标签。"""
+    if not await check_admin(update.effective_user.id):
+        await update.message.reply_text("你没有权限执行此操作。")
+        return
+
+    try:
+        tag_text = " ".join(context.args)
+        if not tag_text:
+            raise ValueError
+        
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM tags WHERE tag_text = %s", (tag_text,))
+            if cur.rowcount == 0:
+                await update.message.reply_text(f"未找到标签 '{tag_text}'。")
+            else:
+                await update.message.reply_text(f"标签 '{tag_text}' 已被移除。")
+
+    except (IndexError, ValueError):
+        await update.message.reply_text("用法: /removetag <标签文本>")
