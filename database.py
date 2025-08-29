@@ -39,12 +39,10 @@ async def create_tables():
                 is_admin BOOLEAN DEFAULT FALSE
             );
         """)
-        # --- “进化法则”：为 users 表添加 username 字段 ---
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN username TEXT;")
             logger.info("✅ (数据库迁移) 'users' 表已成功添加 'username' 字段。")
         except asyncpg.exceptions.DuplicateColumnError:
-            # 字段已存在，静默处理
             pass
 
         # --- reputation_profiles 表 ---
