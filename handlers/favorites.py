@@ -3,7 +3,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 from database import db_cursor
-# 导入 reputation.py 中的 handle_nomination 函数
 from .reputation import handle_nomination
 
 logger = logging.getLogger(__name__)
@@ -23,7 +22,6 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
             keyboard = []
             for fav in favorites:
                 username = fav['favorite_username']
-                # 核心改造：将 query_fav 改为 query_direct，以示区分
                 keyboard.append([
                     InlineKeyboardButton(f"@{username}", callback_data=f"query_direct_{username}"),
                     InlineKeyboardButton("🗑️ 移除", callback_data=f"fav_remove_{user.id}_{username}")
@@ -35,12 +33,17 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         else:
             await context.bot.send_message(chat_id=user.id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
             if update.message and update.message.chat.type != 'private':
-                await update.message.reply_text("你的收藏夹已发送到你的私信中，请注意查收。", quote=True)
+                # --- 核心修复：使用更兼容的 reply_to_message_id 参数来代替 quote=True ---
+                await update.message.reply_text(
+                    "你的收藏夹已发送到你的私信中，请注意查收。",
+                    reply_to_message_id=update.message.message_id
+                )
     except Exception as e:
         logger.error(f"显示收藏夹时出错: {e}", exc_info=True)
         if query:
             await query.answer("显示收藏夹失败，发生内部错误。", show_alert=True)
 
+# (handle_favorite_button 函数保持不变)
 async def handle_favorite_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """统一处理所有与收藏夹相关的按钮点击。"""
     query = update.callback_query
@@ -68,7 +71,5 @@ async def handle_favorite_button(update: Update, context: ContextTypes.DEFAULT_T
             await query.answer("操作失败，发生内部错误。", show_alert=True)
             
     elif action_type == 'query' and command == 'direct':
-        # --- 核心改造：不再伪装，而是直接、坦诚地调用 ---
         favorite_username = "_".join(data[2:])
-        # 直接调用 handle_nomination，并将用户名作为参数传递
         await handle_nomination(update, context, direct_username=favorite_username)
