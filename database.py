@@ -1,17 +1,20 @@
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool  # <--- 改动1：用最直接、最强壮的方式导入“连接池”模块
 from contextlib import contextmanager
 from os import environ
 import logging
 
 logger = logging.getLogger(__name__)
-pool = None
+# 改动2：将全局变量重命名，以避免和导入的模块名冲突
+db_pool = None
 
 def init_pool():
     """初始化数据库连接池。"""
-    global pool
+    global db_pool  # <--- 改动3：使用新的变量名
     try:
-        pool = psycopg2.pool.SimpleConnectionPool(
+        # Use the directly imported 'pool' module
+        db_pool = pool.SimpleConnectionPool(
             1, 20,
             user=environ.get("DB_USER"),
             password=environ.get("DB_PASSWORD"),
@@ -23,13 +26,18 @@ def init_pool():
     except psycopg2.OperationalError as e:
         logger.critical(f"数据库连接失败: {e}")
         raise
+    except AttributeError as e:
+        # 这个捕获是为了万一还出同样的错，能提供更详细的信息
+        logger.critical(f"初始化连接池时发生属性错误，可能是psycopg2版本或环境问题: {e}")
+        raise
+
 
 @contextmanager
 def db_cursor():
     """提供一个数据库游标的上下文管理器。"""
-    if not pool:
+    if not db_pool: # <--- 改动4：使用新的变量名
         raise ConnectionError("数据库连接池未初始化。")
-    conn = pool.getconn()
+    conn = db_pool.getconn() # <--- 改动5：使用新的变量名
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             yield cur
@@ -38,10 +46,11 @@ def db_cursor():
         conn.rollback()
         raise
     finally:
-        pool.putconn(conn)
+        db_pool.putconn(conn) # <--- 改动6：使用新的变量名
 
 def create_tables():
     """检查并创建所有需要的表。"""
+    # (此函数内容保持不变，是正确的)
     commands = [
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -110,14 +119,13 @@ def create_tables():
         for command in commands:
             cur.execute(command)
 
-        # 插入默认标签（如果不存在）
-        default_tags = {
-            1: ["技术大佬", "交易爽快", "乐于助人", "信誉良好"],
-            -1: ["骗子", "态度恶劣", "鸽子王", "垃圾信息"]
-        }
         cur.execute("SELECT COUNT(*) FROM tags")
         if cur.fetchone()[0] == 0:
             logger.info("数据库中没有标签，正在插入默认标签...")
+            default_tags = {
+                1: ["技术大佬", "交易爽快", "乐于助人", "信誉良好"],
+                -1: ["骗子", "态度恶劣", "鸽子王", "垃圾信息"]
+            }
             for tag_type, tags in default_tags.items():
                 for tag in tags:
                     cur.execute("INSERT INTO tags (tag_text, tag_type) VALUES (%s, %s) ON CONFLICT (tag_text) DO NOTHING", (tag, tag_type))
