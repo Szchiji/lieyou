@@ -5,7 +5,8 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from database import init_pool, create_tables
-from handlers.reputation import handle_nomination_via_reply, button_handler as reputation_button_handler, register_user_if_not_exists
+# 注意这里的导入变化
+from handlers.reputation import handle_mention_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
 from handlers.profile import my_favorites, my_profile
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
@@ -24,15 +25,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_if_not_exists(user)
     await update.message.reply_text(
         f"你好，{user.first_name}！欢迎使用社群信誉机器人。\n"
-        "通过回复一个人的消息并输入 /nominate 来提名他/她进行评价。\n"
-        "使用 /help 查看所有可用命令。"
+        "在群里发送 `评价 @username` 即可开始。\n"
+        "使用 /help 查看所有命令。",
+        parse_mode='Markdown'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示帮助信息。"""
     help_text = """
     **用户命令:**
-    /nominate - (回复消息使用) 提名一个用户进行评价。
+    `评价 @username` - (在群里发送) 提名用户进行评价。
     /top 或 /红榜 - 查看推荐排行榜。
     /bottom 或 /黑榜 - 查看拉黑排行榜。
     /myfavorites - 查看你的个人收藏夹（私聊发送）。
@@ -77,16 +79,21 @@ def main() -> None:
     # 注册命令处理器
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("nominate", handle_nomination_via_reply))
     
-    # 使用 CommandHandler 处理英文命令
+    # --- 核心变化在这里 ---
+    # 监听所有以'评价'或'nominate'开头的，并且包含 @mention 的消息
+    nomination_filter = (
+        filters.Text & (filters.Regex('^评价') | filters.Regex('^nominate')) & filters.Entity('mention')
+    )
+    application.add_handler(MessageHandler(nomination_filter, handle_mention_nomination))
+
+    # 排行榜命令
     application.add_handler(CommandHandler("top", get_top_board))
     application.add_handler(CommandHandler("bottom", get_bottom_board))
-    
-    # 使用 MessageHandler + Regex 过滤器处理中文命令
     application.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
     application.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
 
+    # 个人中心命令
     application.add_handler(CommandHandler("myfavorites", my_favorites))
     application.add_handler(CommandHandler("myprofile", my_profile))
     
