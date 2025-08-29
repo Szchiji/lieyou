@@ -32,7 +32,11 @@ async def send_vote_notifications(bot: Bot, nominee_username: str, nominator_id:
 
 async def get_reputation_summary(nominee_username: str, nominator_id: int):
     async with db_transaction() as conn:
-        profile = await conn.fetchrow("SELECT p.recommend_count, p.block_count, f.id IS NOT NULL as is_favorite FROM reputation_profiles p LEFT JOIN favorites f ON p.username = f.favorite_username AND f.user_id = $1 WHERE p.username = $2", nominator_id, nominee_username)
+        # 修正处：不依赖 favorites.id 字段
+        profile = await conn.fetchrow(
+            "SELECT p.recommend_count, p.block_count, (f.user_id IS NOT NULL) as is_favorite FROM reputation_profiles p LEFT JOIN favorites f ON p.username = f.favorite_username AND f.user_id = $1 WHERE p.username = $2", 
+            nominator_id, nominee_username
+        )
         if not profile:
             await conn.execute("INSERT INTO reputation_profiles (username) VALUES ($1)", nominee_username)
             return {'recommend_count': 0, 'block_count': 0, 'is_favorite': False}
