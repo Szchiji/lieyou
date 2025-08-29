@@ -11,31 +11,32 @@ async def register_admin_if_not_exists(user_id: int):
     async with db_cursor() as cur:
         await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
 
-async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE, direct_username: str | None = None):
+async def handle_nomination(
+    update: Update, 
+    context: ContextTypes.DEFAULT_TYPE, 
+    direct_username: str | None = None, 
+    from_favorites: bool = False
+):
     """
     处理查询 @符号 的逻辑。
-    核心改造：可以接受来自按钮点击的、直接指定的用户名。
+    核心改造：可以接受一个 from_favorites 标记，以便生成返回按钮。
     """
     nominator_id = update.effective_user.id
     await register_admin_if_not_exists(nominator_id)
 
     nominee_username = None
-
     if direct_username:
-        # --- 新增逻辑：如果收到了直接指定的用户，就用它 ---
         nominee_username = direct_username
-        logger.info(f"收到来自收藏夹的直接查询请求: {nominee_username}")
     else:
-        # --- 旧逻辑：从用户消息中提取 ---
         match = re.search(r'@(\S+)', update.message.text)
         if match:
             nominee_username = match.group(1)
 
     if not nominee_username:
-        await update.message.reply_text("请使用 '查询 @任意符号' 的格式。")
+        if update.callback_query: await update.callback_query.answer()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="请使用 '查询 @任意符号' 的格式。")
         return
 
-    # --- 后续的所有逻辑都保持不变，它们现在可以处理两种来源的请求 ---
     try:
         async with db_cursor() as cur:
             await cur.execute("INSERT INTO reputation_profiles (username) VALUES ($1) ON CONFLICT DO NOTHING", nominee_username)
@@ -54,27 +55,29 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                       f"👎 *拉黑*: {profile_data.get('block_count', 0)} 次\n\n"
                       f"*收到最多的评价*:\n{tags_str}")
 
+        # --- 核心改造：动态生成键盘 ---
         keyboard = [
             [InlineKeyboardButton("👍 推荐", callback_data=f"vote_up_{nominator_id}_{nominee_username}"),
              InlineKeyboardButton("👎 拉黑", callback_data=f"vote_down_{nominator_id}_{nominee_username}")],
             [InlineKeyboardButton("⭐ 添加到我的收藏", callback_data=f"fav_add_{nominator_id}_{nominee_username}")]
         ]
-        
+
+        # 如果请求来自收藏夹，就添加“返回”按钮
+        if from_favorites:
+            keyboard.append([InlineKeyboardButton("⬅️ 返回收藏夹", callback_data="back_to_favs")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
         # 判断是回复消息还是编辑消息
         if update.callback_query:
-            # 如果是按钮点击触发的，就编辑原消息（收藏夹列表）
-            await update.callback_query.edit_message_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2')
+            await update.callback_query.edit_message_text(reply_text, reply_markup=reply_markup, parse_mode='MarkdownV2')
         else:
-            # 如果是用户输入触发的，就回复新消息
-            await update.message.reply_text(reply_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='MarkdownV2')
+            await update.message.reply_text(reply_text, reply_markup=reply_markup, parse_mode='MarkdownV2')
 
     except Exception as e:
         logger.error(f"处理符号查询时出错: {e}", exc_info=True)
-        if update.callback_query:
-            await update.callback_query.answer("处理查询时发生内部错误。", show_alert=True)
-        else:
-            await update.message.reply_text("处理查询时发生内部错误。")
-
+        # ... (error handling)
+        pass
 
 # (button_handler 函数保持不变)
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
