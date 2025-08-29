@@ -3,23 +3,22 @@ import re
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database import db_transaction # <--- 注意：我们现在导入的是 db_transaction
+from database import db_transaction
 
 logger = logging.getLogger(__name__)
 
-async def auto_delete_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """在指定延迟后删除消息。"""
-    # 这个函数需要从 context 中获取延迟时间
-    delay = context.job.data['delay']
+async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
+    """Job to delete a message after a delay."""
+    job_data = context.job.data
+    delay = job_data.get('delay', -1)
     if delay <= 0: return
-    await asyncio.sleep(delay)
+    
     try:
-        # 使用 context.job.data 中的 chat_id 和 message_id
         await context.bot.delete_message(
-            chat_id=context.job.data['chat_id'],
-            message_id=context.job.data['message_id']
+            chat_id=job_data['chat_id'],
+            message_id=job_data['message_id']
         )
-        logger.info(f"已自动删除消息 {context.job.data['message_id']}")
+        logger.info(f"已自动删除消息 {job_data['message_id']}")
     except Exception as e:
         logger.warning(f"自动删除消息失败: {e}")
 
@@ -45,7 +44,6 @@ async def handle_nomination(
         return
 
     try:
-        # 使用事务进行读取，保证数据一致性
         async with db_transaction() as conn:
             await conn.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", nominator_id)
             await conn.execute("INSERT INTO reputation_profiles (username) VALUES ($1) ON CONFLICT DO NOTHING", nominee_username)
@@ -85,7 +83,6 @@ async def handle_nomination(
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理档案卡上的“推荐”、“拉黑”和“选择标签”按钮。"""
     query = update.callback_query
     data = query.data.split('_')
     action = data[0]
@@ -104,7 +101,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             vote_type, nominator_id_str, nominee_username = data[1], data[2], "_".join(data[3:])
             tag_type = 'recommend' if vote_type == 'up' else 'block'
             
-            async with db_transaction() as conn: # 使用事务读取
+            async with db_transaction() as conn:
                 tags = await conn.fetch("SELECT id, tag_name FROM tags WHERE type = $1", tag_type)
             
             if not tags:
@@ -125,7 +122,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(text=f"请为 `@{nominee_username}` 选择一个标签:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
         elif action == "tag":
-            # --- 核心灵魂修复：使用 db_transaction 确保原子性 ---
             async with db_transaction() as conn:
                 back_index = -1
                 try: back_index = data.index('back')
@@ -144,7 +140,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     column_to_update = "recommend_count" if tag_info['type'] == 'recommend' else "block_count"
                     await conn.execute(f"UPDATE reputation_profiles SET {column_to_update} = {column_to_update} + 1 WHERE username = $1", nominee_username)
             
-            # --- 法则执行：刷新档案卡并设置自动关闭 ---
             await handle_nomination(update, context, direct_username=nominee_username, back_path=back_path_suffix)
             
             async with db_transaction() as conn:
