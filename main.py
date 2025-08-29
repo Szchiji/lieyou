@@ -2,48 +2,64 @@ import logging
 from os import environ
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from database import init_pool, create_tables
-from handlers.base import start, help_command
-from handlers.prey import trap, list_prey, hunt
-from handlers.reputation import leaderboard
+from handlers.reputation import handle_nomination_via_reply, button_handler as reputation_button_handler, register_user_if_not_exists
+from handlers.leaderboard import get_leaderboard_page, leaderboard_button_handler
+from handlers.profile import my_favorites, my_profile
+from handlers.admin import set_admin, list_tags, add_tag, remove_tag
 
-# 加载环境变量
+# 加载环境变量和设置日志
 load_dotenv()
-
-# 设置日志
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- 权限控制 ---
-ALLOWED_GROUP_IDS = [int(gid) for gid in environ.get("ALLOWED_GROUP_IDS", "").split(',') if gid]
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /start 命令，注册用户。"""
+    user = update.effective_user
+    await register_user_if_not_exists(user)
+    await update.message.reply_text(
+        f"你好，{user.first_name}！欢迎使用社群信誉机器人。\n"
+        "通过回复一个人的消息并输入 /nominate 来提名他/她进行评价。\n"
+        "使用 /help 查看所有可用命令。"
+    )
 
-async def check_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """中间件，检查消息是否来自允许的群组"""
-    if not ALLOWED_GROUP_IDS:
-        return True # 如果没有设置群组ID，则允许所有
-    
-    chat_id = update.effective_chat.id
-    if chat_id in ALLOWED_GROUP_IDS:
-        return True
-    
-    logger.warning(f"来自不允许的群组 {chat_id} 的访问被拒绝。")
-    # 可以选择不回复，或者发送一条提示消息
-    # await update.message.reply_text("抱歉，我不能在这个群组工作。")
-    return False
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示帮助信息。"""
+    help_text = """
+    **用户命令:**
+    /nominate - (回复消息使用) 提名一个用户进行评价。
+    /top - 查看推荐排行榜（红榜）。
+    /bottom - 查看拉黑排行榜（黑榜）。
+    /myfavorites - 查看你的个人收藏夹（私聊发送）。
+    /myprofile - 查看你自己的声望和收到的标签。
+    /help - 显示此帮助信息。
+
+    **管理员命令:**
+    /setadmin <user_id> - 设置一个用户为管理员。
+    /listtags - 列出所有可用的评价标签。
+    /addtag <推荐|拉黑> <标签> - 添加一个新的评价标签。
+    /removetag <标签> - 移除一个评价标签。
+    """
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-async def authorized_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """在执行实际命令前进行权限检查"""
-    if await check_group(update, context):
-        # 注意：这里需要一种方式来调用原始的命令处理函数
-        # telegram-python-bot v21 的处理方式更复杂，我们简化一下
-        # 暂时将所有命令处理函数都包装起来
-        pass # 实际逻辑在 application.add_handler 中处理
+async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """总按钮分发器。"""
+    query = update.callback_query
+    action = query.data.split('_')[0]
+
+    if action in ["vote", "tag", "fav"]:
+        await reputation_button_handler(update, context)
+    elif action == "leaderboard":
+        await leaderboard_button_handler(update, context)
+    # 其他模块的按钮可以在这里添加
+    else:
+        await query.answer("未知操作")
 
 
 def main() -> None:
@@ -58,21 +74,28 @@ def main() -> None:
         return
 
     application = Application.builder().token(environ["TELEGRAM_BOT_TOKEN"]).build()
-
-    # 创建一个过滤器，只处理来自授权群组的命令
-    # 如果 ALLOWED_GROUP_IDS 为空, filters.ALL 将匹配所有
-    group_filter = filters.Chat(chat_id=ALLOWED_GROUP_IDS) if ALLOWED_GROUP_IDS else filters.ALL
-
-    # 注册命令处理器，并应用群组过滤器
-    application.add_handler(CommandHandler("start", start, filters=group_filter))
-    application.add_handler(CommandHandler("help", help_command, filters=group_filter))
-    application.add_handler(CommandHandler("trap", trap, filters=group_filter))
-    application.add_handler(CommandHandler("list", list_prey, filters=group_filter))
-    application.add_handler(CommandHandler("hunt", hunt, filters=group_filter))
-    application.add_handler(CommandHandler("leaderboard", leaderboard, filters=group_filter))
-
-    logger.info("所有命令处理器已注册。")
     
+    # 注册命令处理器
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("nominate", handle_nomination_via_reply))
+    
+    application.add_handler(CommandHandler(["top", "红榜"], get_leaderboard_page))
+    application.add_handler(CommandHandler(["bottom", "黑榜"], get_leaderboard_page))
+    
+    application.add_handler(CommandHandler("myfavorites", my_favorites))
+    application.add_handler(CommandHandler("myprofile", my_profile))
+    
+    # 管理员命令
+    application.add_handler(CommandHandler("setadmin", set_admin))
+    application.add_handler(CommandHandler("listtags", list_tags))
+    application.add_handler(CommandHandler("addtag", add_tag))
+    application.add_handler(CommandHandler("removetag", remove_tag))
+
+    # 注册总按钮处理器
+    application.add_handler(CallbackQueryHandler(all_button_handler))
+    
+    logger.info("所有处理器已注册。")
     application.run_polling()
 
 if __name__ == '__main__':
