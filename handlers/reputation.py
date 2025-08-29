@@ -1,7 +1,7 @@
 import logging
 import hashlib
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot, MessageEntity
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import ContextTypes
 from telegram.error import Forbidden, BadRequest
 from database import db_transaction
@@ -69,11 +69,9 @@ async def build_summary_view(nominee_username: str, summary: dict):
 async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     nominee_username = None
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == MessageEntity.MENTION and entity.offset == 0:
-                nominee_username = message.text[entity.offset + 1 : entity.offset + entity.length]
-                break
+    if context.matches:
+        match = context.matches[0]
+        nominee_username = match.group(1) or match.group(2)
     if not nominee_username:
         return
     nominator_id = update.effective_user.id
