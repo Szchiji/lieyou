@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 POOL = None
 
 async def init_pool():
+    """初始化异步数据库连接池。"""
     global POOL
     if POOL: return
     try:
@@ -19,6 +20,7 @@ async def init_pool():
 
 @asynccontextmanager
 async def db_cursor():
+    """提供一个数据库游标的上下文管理器。"""
     if not POOL: await init_pool()
     conn = None
     try:
@@ -31,7 +33,10 @@ async def db_cursor():
         if conn: await POOL.release(conn)
 
 async def create_tables():
-    """最终的、为“符号信誉系统”设计的数据库初始化程序。"""
+    """
+    最终的、带“符号收藏夹”的数据库初始化程序。
+    注意：此函数会清空并重建核心表，以确保最终设计的正确性。
+    """
     async with db_cursor() as cur:
         logger.info("正在执行最终的数据库结构审查与重建...")
         try:
@@ -43,21 +48,12 @@ async def create_tables():
                 );
             """)
 
-            # --- 2. 核心改造：创建“符号档案”表 ---
-            # 为了确保干净，先删除所有可能存在的旧表
+            # --- 2. 核心：创建“符号档案”表 ---
+            # 为了确保从旧设计彻底迁移，先删除相关旧表
             await cur.execute("DROP TABLE IF EXISTS favorites CASCADE;")
             await cur.execute("DROP TABLE IF EXISTS votes CASCADE;")
             await cur.execute("DROP TABLE IF EXISTS reputation_profiles CASCADE;")
-            # 也删除旧的 users 表的列，以防万一
-            try:
-                await cur.execute("ALTER TABLE users DROP COLUMN username;")
-                await cur.execute("ALTER TABLE users DROP COLUMN full_name;")
-                await cur.execute("ALTER TABLE users DROP COLUMN recommend_count;")
-                await cur.execute("ALTER TABLE users DROP COLUMN block_count;")
-            except asyncpg.exceptions.UndefinedColumnError:
-                pass
-
-            logger.info("已移除所有旧的、与用户相关的表和列，准备重建为“符号系统”。")
+            logger.info("已移除所有旧的核心数据表，准备重建为“万物信誉系统”。")
             
             await cur.execute("""
                 CREATE TABLE reputation_profiles (
@@ -77,7 +73,7 @@ async def create_tables():
                 );
             """)
 
-            # --- 4. 投票表 (改造以适应新核心) ---
+            # --- 4. 投票表 (适配“符号系统”) ---
             await cur.execute("""
                 CREATE TABLE votes (
                     id SERIAL PRIMARY KEY,
@@ -90,7 +86,18 @@ async def create_tables():
             """)
             logger.info("🎉 已成功创建适配“符号系统”的 `votes` 表！")
 
-            logger.info("✅✅✅ 所有数据库表都已达到最终的、完美的“符号信誉系统”状态！")
+            # --- 5. 核心修复：重新创建“符号收藏夹”表 ---
+            await cur.execute("""
+                CREATE TABLE favorites (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    favorite_username VARCHAR(255) REFERENCES reputation_profiles(username) ON DELETE CASCADE,
+                    UNIQUE(user_id, favorite_username)
+                );
+            """)
+            logger.info("🎉 已成功重建“符号收藏夹” (`favorites`) 表！")
+
+            logger.info("✅✅✅ 所有数据库表都已达到最终的、完美的“万物信誉系统”状态！")
         except Exception as e:
             logger.error(f"❌ 在最终的数据库重建过程中发生严重错误: {e}", exc_info=True)
             raise
