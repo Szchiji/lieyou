@@ -27,19 +27,22 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         total_profiles = total_record['count']
         total_pages = math.ceil(total_profiles / PAGE_SIZE) if total_profiles > 0 else 1
 
-        text = f"*{title}*\n(按符号排名)\n\n"
+        # --- 核心修复：对所有特殊字符进行转义 ---
+        title_safe = escape_markdown(title, version=2)
+        text = f"*{title_safe}*\n\(按符号排名\)\n\n" # 手动转义括号
+
         if not profiles:
             text += "这个排行榜是空的。"
         else:
             start_num = (page - 1) * PAGE_SIZE
             lines = []
             for i, p in enumerate(profiles):
+                # 对用户名进行转义，以防用户名中包含特殊字符
                 safe_username = escape_markdown(p['username'], version=2)
                 line = f"{i + start_num + 1}\\. `@{safe_username}` \\- *{p[order_col]}* {count_col_name}"
                 lines.append(line)
             text += "\n".join(lines)
 
-        # (分页按钮逻辑保持不变)
         keyboard = []
         row = []
         if page > 1: row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"leaderboard_{board_type}_{page - 1}"))
@@ -48,6 +51,7 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         if row: keyboard.append(row)
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # 统一使用 MarkdownV2 模式发送
         if is_callback:
             await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='MarkdownV2')
         else:
@@ -55,6 +59,12 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, b
 
     except Exception as e:
         logger.error(f"生成排行榜时出错: {e}", exc_info=True)
+        # 避免在出错时再次引发错误
+        error_text = "生成排行榜时发生错误，请稍后再试。"
+        if is_callback:
+            await update.callback_query.edit_message_text(error_text)
+        else:
+            await update.message.reply_text(error_text)
 
 async def get_top_board(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_leaderboard(update, context, board_type='top', page=1)
