@@ -1,72 +1,82 @@
 import logging
 import asyncpg
 from os import environ
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
 POOL = None
 
-def init_pool():
+async def init_pool():
+    """初始化异步数据库连接池。"""
     global POOL
+    if POOL:
+        return
     try:
-        POOL = asyncpg.create_pool_sync(
+        POOL = await asyncpg.create_pool(
             dsn=environ.get("DATABASE_URL"),
             min_size=1,
             max_size=10
         )
-        logger.info("数据库连接池初始化成功。")
+        logger.info("✅ 异步数据库连接池初始化成功。")
     except Exception as e:
-        logger.critical(f"数据库连接池初始化失败: {e}")
+        logger.critical(f"❌ 数据库连接池初始化失败: {e}")
         raise
 
-@contextmanager
-def db_cursor():
+@asynccontextmanager
+async def db_cursor():
+    """提供一个异步数据库连接的上下文管理器。"""
     if not POOL:
-        raise ConnectionError("数据库连接池未初始化。")
+        await init_pool() # 如果池不存在，则尝试初始化
+    
     conn = None
     try:
-        conn = POOL.acquire()
+        conn = await POOL.acquire()
         yield conn
+    except Exception as e:
+        logger.error(f"数据库操作中获取连接失败: {e}")
+        raise
     finally:
         if conn:
-            POOL.release(conn)
+            await POOL.release(conn)
 
-def create_tables():
-    """
-    检查并创建所有需要的表。
-    核心修复：在 users 表中添加 full_name 字段。
-    """
-    with db_cursor() as cur:
+async def create_tables():
+    """检查并创建所有需要的表（完全异步）。"""
+    async with db_cursor() as cur:
         try:
-            # 升级 users 表，添加 full_name 列
-            cur.execute("""
+            # 创建 users 表
+            await cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id BIGINT PRIMARY KEY,
                     username VARCHAR(255),
-                    full_name VARCHAR(255), -- 新增字段
+                    full_name VARCHAR(255),
                     reputation INT DEFAULT 0,
                     is_admin BOOLEAN DEFAULT FALSE
                 );
             """)
             
-            # 为了确保旧表也能更新，我们尝试添加列
-            # 如果列已存在，会静默失败，不影响程序
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN full_name VARCHAR(255);")
-                logger.info("成功为 users 表添加 full_name 列。")
-            except asyncpg.exceptions.DuplicateColumnError:
-                # 列已经存在，这是正常情况，无需操作
-                pass
+            # 尝试为旧表添加 full_name 列 (如果不存在)
+            await cur.execute("""
+                DO $$
+                BEGIN
+                    ALTER TABLE users ADD COLUMN full_name VARCHAR(255);
+                    RAISE NOTICE '成功为 users 表添加 full_name 列。';
+                EXCEPTION
+                    WHEN duplicate_column THEN
+                    RAISE NOTICE 'users 表的 full_name 列已存在，无需添加。';
+                END
+                $$;
+            """)
 
-            cur.execute("""
+            # 创建其他表
+            await cur.execute("""
                 CREATE TABLE IF NOT EXISTS tags (
                     id SERIAL PRIMARY KEY,
                     tag_name VARCHAR(255) UNIQUE NOT NULL,
                     type VARCHAR(50) NOT NULL CHECK (type IN ('recommend', 'block'))
                 );
             """)
-            cur.execute("""
+            await cur.execute("""
                 CREATE TABLE IF NOT EXISTS votes (
                     id SERIAL PRIMARY KEY,
                     nominator_id BIGINT REFERENCES users(id),
@@ -76,7 +86,7 @@ def create_tables():
                     UNIQUE(nominator_id, nominee_id, tag_id)
                 );
             """)
-            cur.execute("""
+            await cur.execute("""
                 CREATE TABLE IF NOT EXISTS favorites (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT REFERENCES users(id),
@@ -84,7 +94,7 @@ def create_tables():
                     UNIQUE(user_id, favorite_user_id)
                 );
             """)
-            logger.info("所有表都已成功检查/创建/更新。")
+            logger.info("✅ 所有表都已成功检查/创建/更新。")
         except Exception as e:
-            logger.error(f"创建或更新表时发生错误: {e}")
+            logger.error(f"❌ 创建或更新表时发生错误: {e}")
             raise
