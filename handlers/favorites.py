@@ -1,7 +1,7 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.error import Forbidden
+from telegram.error import Forbidden, BadRequest
 from database import db_transaction
 from handlers.reputation import get_reputation_summary, build_summary_view
 from html import escape
@@ -45,6 +45,10 @@ async def handle_favorite_button(update: Update, context: ContextTypes.DEFAULT_T
             await conn.execute("DELETE FROM favorites WHERE user_id = $1 AND favorite_username = $2", user_id, nominee_username)
             await query.answer("🗑️ 已从星盘移出。")
     
-    summary = await get_reputation_summary(nominee_username, user_id)
-    message_content = await build_summary_view(nominee_username, summary)
-    await query.edit_message_text(**message_content)
+    try:
+        summary = await get_reputation_summary(nominee_username, user_id)
+        message_content = await build_summary_view(nominee_username, summary)
+        await query.edit_message_text(**message_content)
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+             logger.error(f"编辑收藏状态时出错: {e}")
