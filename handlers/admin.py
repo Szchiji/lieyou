@@ -242,4 +242,3 @@ async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ 操作失败：该项目已存在。")
         else:
             await update.message.reply_text(f"❌ 操作失败，发生未知错误。")
-```
