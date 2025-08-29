@@ -5,7 +5,6 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from database import db_cursor, init_pool, create_tables
-# 统一从 reputation 导入 handle_nomination
 from handlers.reputation import handle_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
 from handlers.profile import my_favorites, my_profile
@@ -49,7 +48,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
         user_data = cur.fetchone()
         is_admin = user_data and user_data['is_admin']
-
     user_help = """
 *用户命令:*
 `查询 @username` \- 查询用户信誉并发起评价\.
@@ -69,7 +67,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_help_text = user_help
     if is_admin:
         full_help_text += "\n" + admin_help
-
     await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -98,12 +95,9 @@ def main() -> None:
 
     application = Application.builder().token(environ["TELEGRAM_BOT_TOKEN"]).post_init(post_init).build()
     
-    # --- 最终的、简化的过滤器 ---
-    # 只响应以 "查询" 或 "query" 开头，并且包含 @mention 的消息
     nomination_filter = (filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention')
     application.add_handler(MessageHandler(nomination_filter, handle_nomination))
 
-    # 其他处理器保持不变
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", get_top_board))
@@ -119,7 +113,12 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(all_button_handler))
     
     logger.info("所有处理器已注册。正在开始轮询...")
-    application.run_polling()
+    
+    # --- 核心修复：添加 drop_pending_updates=True ---
+    # 这会告诉机器人在开始轮询前，清除掉所有在它离线时收到的旧消息。
+    # 这能有效解决因部署重叠导致的 Conflict 错误。
+    application.run_polling(drop_pending_updates=True)
+    
     logger.info("机器人已停止。")
 
 if __name__ == '__main__':
