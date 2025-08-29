@@ -1,6 +1,7 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest
 from database import db_transaction
 from cachetools import TTLCache
 from html import escape
@@ -8,6 +9,13 @@ from html import escape
 logger = logging.getLogger(__name__)
 cache = None
 DEFAULT_TTL = 300
+
+def clear_leaderboard_cache():
+    """公开的函数，用于从外部模块清除排行榜缓存。"""
+    global cache
+    if cache is not None:
+        cache.clear()
+        logger.info("排行榜缓存已被外部指令清除。")
 
 async def get_cache_ttl() -> int:
     try:
@@ -32,7 +40,7 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, b
     
     is_refresh = update.callback_query and "_refresh" in update.callback_query.data
     if is_refresh:
-        cache.clear()
+        clear_leaderboard_cache()
         await update.callback_query.answer("🔄 镜像已刷新")
 
     cache_key = f"leaderboard_{board_type}"
@@ -79,14 +87,11 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, b
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if update.callback_query:
-        if is_refresh:
-             # Prevent "Message is not modified" error after answering refresh
-            try:
-                await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-            except BadRequest as e:
-                if "Message is not modified" not in str(e): raise e
-        else:
+    try:
+        if update.callback_query:
             await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"编辑排行榜时出错: {e}")
