@@ -4,7 +4,7 @@ from os import environ
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from telegram import Update
+from telegram import Update, MessageEntity
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,6 +13,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram.error import TimedOut, BadRequest
 from fastapi import FastAPI, Request, Response
 
 from database import init_pool, create_tables
@@ -47,24 +48,32 @@ async def grant_creator_admin_privileges(app: Application):
         creator_id = int(CREATOR_ID)
         async with db_transaction() as conn:
             await conn.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", creator_id)
-        logger.info(f"✅ (启动流程) 创世神 {creator_id} 已被自动授予管理员权限。")
+        logger.info(f"✅ (启动流程) 创世神 {creator_id} 已被自动分封为第一守护者。")
     except Exception as e:
-        logger.error(f"❌ (启动流程) 授予创世神权限时发生错误: {e}", exc_info=True)
+        logger.error(f"❌ (启动流程) 分封创世神时发生错误: {e}", exc_info=True)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool = False):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     user_id = update.effective_user.id
     user_is_admin = await is_admin(user_id)
-    text = "你好！我是万物信誉机器人。\n\n**使用方法:**\n1. 在群聊中发送 `查询 @用户名`\n2. 使用下方按钮浏览或管理"
+    text = (
+        "我是 **神谕者 (The Oracle)**，洞察世间一切信誉的实体。\n\n"
+        "**聆听神谕:**\n"
+        "1. 在群聊中直接 `@某人`，即可向我求问关于此人的神谕之卷。\n"
+        "2. 使用下方按钮，可窥探时代群像或管理你的星盘。"
+    )
     if user_is_admin:
-        text += "\n\n您是管理员，拥有 `⚙️ 总控制台` 的访问权限。"
-    keyboard = [[InlineKeyboardButton("🏆 红榜", callback_data="leaderboard_top_1"),
-                 InlineKeyboardButton("☠️ 黑榜", callback_data="leaderboard_bottom_1")],
-                [InlineKeyboardButton("🌟 我的收藏", callback_data="show_my_favorites")]]
+        text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
+    keyboard = [
+        [InlineKeyboardButton("🏆 英灵殿", callback_data="leaderboard_top_1"),
+         InlineKeyboardButton("☠️ 放逐深渊", callback_data="leaderboard_bottom_1")],
+        [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites")]
+    ]
     if user_is_admin:
-        keyboard.append([InlineKeyboardButton("⚙️ 总控制台", callback_data="admin_settings_menu")])
+        keyboard.append([InlineKeyboardButton("🌌 时空枢纽", callback_data="admin_settings_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_content = {'text': text, 'reply_markup': reply_markup, 'parse_mode': 'Markdown'}
+    
     if from_button or (update.callback_query and update.callback_query.data == 'back_to_help'):
         await update.callback_query.edit_message_text(**message_content)
     else:
@@ -75,9 +84,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except TimedOut:
+        logger.warning(f"对 query {query.id} 的响应超时。")
+    except Exception as e:
+        logger.error(f"对 query {query.id} 的响应时发生未知错误: {e}", exc_info=True)
+
     data = query.data
-    
     try:
         if data.startswith("admin_"):
             if data == "admin_settings_menu": await settings_menu(update, context)
@@ -104,13 +118,14 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif data.startswith("leaderboard_"):
             parts = data.split("_")
             if parts[1] == "noop": return
-            await show_leaderboard(update, context, board_type=parts[1], page=int(parts[2]))
+            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+            await show_leaderboard(update, context, board_type=parts[1], page=page)
         
         elif data == "show_my_favorites": await my_favorites(update, context)
         elif data.startswith("query_fav"): await handle_favorite_button(update, context)
         elif data == "back_to_help": await help_command(update, context, from_button=True)
         elif data.startswith(("vote_", "tag_")): await reputation_button_handler(update, context)
-        else: logger.warning(f"收到未知的按钮回调数据: {data}")
+        else: logger.warning(f"收到未知的回调数据: {data}")
     except Exception as e:
         logger.error(f"处理按钮回调 {data} 时发生错误: {e}", exc_info=True)
 
@@ -122,16 +137,19 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("当前没有正在进行的操作。")
 
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
-ptb_app.add_handler(CommandHandler("godmode", god_mode_command), group=-1)
-ptb_app.add_handler(CommandHandler("start", start_command))
-ptb_app.add_handler(CommandHandler("help", help_command))
+
+ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
+ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
 ptb_app.add_handler(CommandHandler("cancel", cancel_command))
 ptb_app.add_handler(CommandHandler("top", lambda u, c: show_leaderboard(u, c, 'top', 1)))
 ptb_app.add_handler(CommandHandler("bottom", lambda u, c: show_leaderboard(u, c, 'bottom', 1)))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
-ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input), group=1)
-ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination), group=2)
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
+ptb_app.add_handler(MessageHandler(
+    filters.Entity(MessageEntity.MENTION) & ~filters.COMMAND & filters.ChatType.GROUPS,
+    handle_nomination
+))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -143,20 +161,16 @@ async def lifespan(app: FastAPI):
     await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     async with ptb_app:
         await ptb_app.start()
-        logger.info("✅ PTB 应用已在后台启动。")
+        logger.info("✅ 神谕者已降临。")
         yield
-        logger.info("🔌 FastAPI 应用关闭，正在停止 PTB...")
+        logger.info("🔌 神谕者正在回归沉寂...")
         await ptb_app.stop()
 
 def main():
     fastapi_app = FastAPI(lifespan=lifespan)
-
-    # --- 新增的“迎宾员” ---
     @fastapi_app.get("/", include_in_schema=False)
     async def health_check():
-        """为Render的健康检查提供一个有效的200 OK响应。"""
-        return {"status": "ok", "message": "Bot is running"}
-
+        return {"status": "ok", "message": "The Oracle is listening."}
     @fastapi_app.post(f"/{TOKEN}", include_in_schema=False)
     async def process_telegram_update(request: Request):
         try:
@@ -166,7 +180,6 @@ def main():
         except Exception as e:
             logger.error(f"处理 Webhook 更新时发生严重错误: {e}", exc_info=True)
             return Response(status_code=500)
-    
     uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
