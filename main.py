@@ -1,5 +1,4 @@
 import logging
-import asyncio
 from os import environ
 from dotenv import load_dotenv
 
@@ -15,17 +14,20 @@ from handlers.leaderboard import leaderboard
 from handlers.admin import set_rep
 from constants import CALLBACK_LIST_PREFIX
 
+# 日志配置
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-async def main() -> None:
+def main() -> None:
     """启动并运行机器人。"""
     load_dotenv()
     
+    # 初始化数据库连接池并创建表
     init_pool()
     create_tables()
 
+    # 创建 Application 实例
     token = environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("TELEGRAM_BOT_TOKEN 环境变量未设置！")
@@ -46,8 +48,9 @@ async def main() -> None:
     # 注册回调处理器
     application.add_handler(CallbackQueryHandler(list_prey, pattern=f"^{CALLBACK_LIST_PREFIX}"))
 
+    # 启动机器人
     logger.info("Bot is starting up...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
