@@ -3,7 +3,9 @@ from telegram.ext import ContextTypes
 from psycopg2.extras import DictCursor
 
 from database import get_conn, put_conn
+from handlers.decorators import restricted_to_group
 
+@restricted_to_group
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示声望最高的头狼榜。"""
     conn = get_conn()
@@ -20,14 +22,6 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     rank_icon = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"**{i}.**"
                     board_text += f"{rank_icon} @{user['username']} - {user['reputation']} 声望\n"
             
-            # 可以在此处加入“本周猎王”等更复杂的查询
-            
             await update.message.reply_text(board_text, parse_mode='Markdown')
     finally:
         put_conn(conn)
-# ... (其他导入) ...
-from handlers.decorators import restricted_to_group
-
-@restricted_to_group
-async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (函数内部代码保持不变) ...
