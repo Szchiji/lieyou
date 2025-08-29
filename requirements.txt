@@ -1,3 +1,8 @@
-python-telegram-bot==21.0.1
-psycopg2-binary==2.9.9
-python-dotenv==1.0.1
+# Telegram Bot Framework with Webhook support
+python-telegram-bot[webhooks]==21.0.1
+
+# PostgreSQL database driver
+psycopg2-binary
+
+# For loading .env files
+python-dotenv
