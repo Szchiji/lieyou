@@ -17,6 +17,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+async def grant_creator_admin_privileges():
+    """在启动时，为 CREATOR_ID 授予管理员权限。"""
+    creator_id_str = environ.get("CREATOR_ID")
+    if not creator_id_str:
+        logger.warning("未设置 CREATOR_ID 环境变量，无法自动授予创世管理员权限。")
+        return
+    
+    try:
+        creator_id = int(creator_id_str)
+        with db_cursor() as cur:
+            # 检查创世神是否存在
+            cur.execute("SELECT is_admin FROM users WHERE id = %s", (creator_id,))
+            user = cur.fetchone()
+            if not user:
+                logger.warning(f"CREATOR_ID {creator_id} 尚未与机器人互动，暂时无法授权。请先私聊机器人。")
+                return
+            
+            # 如果创世神还不是管理员，则授权
+            if not user['is_admin']:
+                cur.execute("UPDATE users SET is_admin = TRUE WHERE id = %s", (creator_id,))
+                logger.info(f"✅ 创世神 {creator_id} 已被自动授予管理员权限。")
+            else:
+                logger.info(f"创世神 {creator_id} 已经是管理员。")
+
+    except (ValueError, TypeError):
+        logger.error(f"CREATOR_ID '{creator_id_str}' 不是一个有效的数字ID。")
+    except Exception as e:
+        logger.error(f"授予创世神权限时发生错误: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await register_user_if_not_exists(user)
@@ -29,7 +58,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await register_user_if_not_exists(update.effective_user) # 确保用户存在
+    await register_user_if_not_exists(update.effective_user)
     
     with db_cursor() as cur:
         cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
@@ -75,6 +104,10 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await query.answer("未知操作")
 
+async def post_init(application: Application):
+    """在机器人应用初始化后执行的任务。"""
+    await grant_creator_admin_privileges()
+
 def main() -> None:
     logger.info("机器人正在启动...")
 
@@ -85,7 +118,7 @@ def main() -> None:
         logger.critical(f"数据库初始化失败，机器人无法启动: {e}")
         return
 
-    application = Application.builder().token(environ["TELEGRAM_BOT_TOKEN"]).build()
+    application = Application.builder().token(environ["TELEGRAM_BOT_TOKEN"]).post_init(post_init).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
