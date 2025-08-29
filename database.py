@@ -29,21 +29,30 @@ async def db_transaction():
             logger.debug("事务提交。")
 
 async def create_tables():
-    """Creates all necessary database tables if they don't exist."""
-    logger.info("正在执行最终的数据库结构审查与重建...")
+    """
+    Creates all necessary database tables *IF THEY DON'T EXIST*.
+    This function is now safe to run on every startup.
+    """
+    logger.info("正在执行数据库结构审查...")
     async with db_transaction() as conn:
-        # We drop tables to ensure a clean slate on major structural changes.
-        # For production, a more robust migration system would be used.
-        await conn.execute("DROP TABLE IF EXISTS votes, tags, reputation_profiles, users, favorites, settings CASCADE;")
-        logger.info("已移除所有旧的核心数据表，准备重建为“万物信誉系统”。")
+        # --- 【炸弹已拆除】 ---
+        # 毁灭咒语 "DROP TABLE..." 已被彻底移除。
+        # 现在，我们只创建尚不存在的表。
         
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT PRIMARY KEY,
+            is_admin BOOLEAN NOT NULL DEFAULT FALSE
+        );""")
+        logger.info("  -> `users` 表结构审查完毕。")
+
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS reputation_profiles (
             username TEXT PRIMARY KEY,
             recommend_count INTEGER NOT NULL DEFAULT 0,
             block_count INTEGER NOT NULL DEFAULT 0
         );""")
-        logger.info("🎉 已成功创建核心的 `reputation_profiles` 表！")
+        logger.info("  -> `reputation_profiles` 表结构审查完毕。")
 
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS tags (
@@ -51,6 +60,7 @@ async def create_tables():
             tag_name TEXT UNIQUE NOT NULL,
             type TEXT NOT NULL CHECK (type IN ('recommend', 'block'))
         );""")
+        logger.info("  -> `tags` 表结构审查完毕。")
 
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS votes (
@@ -60,13 +70,7 @@ async def create_tables():
             tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
             UNIQUE(nominator_id, nominee_username, tag_id)
         );""")
-        logger.info("🎉 已成功创建适配“符号系统”的 `votes` 表！")
-
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id BIGINT PRIMARY KEY,
-            is_admin BOOLEAN NOT NULL DEFAULT FALSE
-        );""")
+        logger.info("  -> `votes` 表结构审查完毕。")
         
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS favorites (
@@ -74,16 +78,16 @@ async def create_tables():
             favorite_username TEXT NOT NULL,
             PRIMARY KEY (user_id, favorite_username)
         );""")
-        logger.info("🎉 已成功重建“符号收藏夹” (`favorites`) 表！")
+        logger.info("  -> `favorites` 表结构审查完毕。")
 
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );""")
-        # Default settings
+        # 只有在 settings 表第一次被创建时，才会尝试插入默认值。
         await conn.execute("INSERT INTO settings (key, value) VALUES ('auto_close_delay', '-1') ON CONFLICT DO NOTHING;")
         await conn.execute("INSERT INTO settings (key, value) VALUES ('leaderboard_cache_ttl', '300') ON CONFLICT DO NOTHING;")
-        logger.info("🎉 已成功创建并初始化 `settings` 表！")
+        logger.info("  -> `settings` 表结构审查完毕。")
         
-    logger.info("✅✅✅ 所有数据库表都已达到最终的、完美的“万物信誉系统”状态！")
+    logger.info("✅✅✅ 数据库结构已达到最终稳定状态！世界基石坚不可摧。")
