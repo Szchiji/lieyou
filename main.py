@@ -3,45 +3,32 @@ import uvicorn
 from os import environ
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
-
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-    ContextTypes,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from fastapi import FastAPI, Request, Response
-
 from database import init_pool, create_tables, db_cursor
-from handlers.reputation import handle_nomination, button_handler as reputation_button_handler
+from handlers.reputation import handle_nomination
 from handlers.leaderboard import get_top_board, get_bottom_board, show_leaderboard
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
 from handlers.favorites import my_favorites, handle_favorite_button
 
+# ... (日志和环境变量设置保持不变) ...
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 TOKEN = environ.get("TELEGRAM_BOT_TOKEN")
 PORT = int(environ.get("PORT", "10000"))
 RENDER_URL = environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_URL = f"{RENDER_URL}/{TOKEN}" if RENDER_URL else None
 CREATOR_ID = environ.get("CREATOR_ID")
 
+# ... (grant_creator_admin_privileges 和 start 函数保持不变) ...
 async def grant_creator_admin_privileges(app: Application):
-    """在启动时自动为创世神授予管理员权限。"""
     if not CREATOR_ID: return
     try:
         creator_id = int(CREATOR_ID)
-        # --- 核心修复：不再重复调用 create_tables，只执行授权操作 ---
         async with db_cursor() as cur:
-            await cur.execute(
-                "INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE",
-                creator_id,
-            )
+            await cur.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", creator_id)
         logger.info(f"✅ 创世神 {creator_id} 已被自动授予管理员权限。")
     except Exception as e:
         logger.error(f"❌ 授予创世神权限时发生错误: {e}", exc_info=True)
@@ -49,33 +36,48 @@ async def grant_creator_admin_privileges(app: Application):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_cursor() as cur:
         await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
-    await update.message.reply_text("你好！我是万物信誉机器人。使用 /help 查看所有命令。")
+    # --- 核心改造：启动时也显示带按钮的帮助菜单 ---
+    await help_command(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_admin_user = False
-    try:
-        async with db_cursor() as cur:
-            await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
-            user_data = await cur.fetchrow("SELECT is_admin FROM users WHERE id = $1", update.effective_user.id)
-            if user_data: is_admin_user = user_data['is_admin']
-    except Exception as e: logger.error(f"查询用户权限时出错: {e}")
-    user_help = (
-        "**用户命令:**\n`查询 @任意符号` \- 查询某个符号的信誉并发起评价。\n`/top` 或 `/红榜` \- 查看推荐排行榜。\n`/bottom` 或 `/黑榜` \- 查看拉黑排行榜。\n`/myfavorites` \- 查看你的个人收藏夹（私聊发送）。\n`/help` \- 显示此帮助信息。"
+    """处理 /help 命令，提供一个完全由按钮组成的、可交互的菜单。"""
+    text = (
+        "你好！我是万物信誉机器人。\n\n"
+        "**使用方法:**\n"
+        "1. 直接在群里发送 `查询 @任意符号` 来查看或评价一个符号。\n"
+        "2. 使用下方的按钮来浏览排行榜或你的个人收藏。"
     )
-    admin_help = (
-        "\n\n**管理员命令:**\n`/setadmin <user_id>` \- 设置用户为管理员。\n`/listtags` \- 列出所有评价标签。\n`/addtag <推荐|拉黑> <标签>` \- 添加新标签。\n`/removetag <标签>` \- 移除一个标签。"
-    )
-    full_help_text = user_help + (admin_help if is_admin_user else "")
-    # 使用 MarkdownV2 发送，并确保所有特殊字符都已转义
-    await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
+    
+    # --- 核心革命：将帮助菜单彻底改造为按钮面板 ---
+    keyboard = [
+        [InlineKeyboardButton("🏆 推荐榜 (/top)", callback_data="show_top_board")],
+        [InlineKeyboardButton("☠️ 拉黑榜 (/bottom)", callback_data="show_bottom_board")],
+        [InlineKeyboardButton("⭐ 我的收藏 (/myfavorites)", callback_data="show_my_favorites")]
+    ]
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """统一的按钮回调调度中心，现在也处理来自帮助菜单的请求。"""
     query = update.callback_query
     await query.answer()
     data = query.data.split("_")
     action_type = data[0]
+    
     try:
+        # --- 核心改造：处理来自新帮助菜单的按钮点击 ---
+        if action_type == "show":
+            if data[1] == "top":
+                await show_leaderboard(update, context, board_type='top', page=1)
+            elif data[1] == "bottom":
+                await show_leaderboard(update, context, board_type='bottom', page=1)
+            elif data[1] == "my":
+                await my_favorites(update, context)
+            return
+
         if action_type in ["vote", "tag"]:
+            # 为了处理档案卡上的按钮，我们需要一个独立的处理器
+            from handlers.reputation import button_handler as reputation_button_handler
             await reputation_button_handler(update, context)
         elif action_type == "leaderboard":
             if data[1] == "noop": return
@@ -89,19 +91,21 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"处理按钮回调 {query.data} 时发生错误: {e}", exc_info=True)
 
+# ... (ptb_app 注册和 lifespan, main 等函数保持不变) ...
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination))
-ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CommandHandler("help", help_command))
+ptb_app.add_handler(CommandHandler(["start", "help"], help_command)) # start 和 help 现在都指向新的菜单
 ptb_app.add_handler(CommandHandler("top", get_top_board))
 ptb_app.add_handler(MessageHandler(filters.Regex("^/红榜$"), get_top_board))
 ptb_app.add_handler(CommandHandler("bottom", get_bottom_board))
 ptb_app.add_handler(MessageHandler(filters.Regex("^/黑榜$"), get_bottom_board))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
+# 管理员命令保持不变
 ptb_app.add_handler(CommandHandler("setadmin", set_admin))
 ptb_app.add_handler(CommandHandler("listtags", list_tags))
 ptb_app.add_handler(CommandHandler("addtag", add_tag))
 ptb_app.add_handler(CommandHandler("removetag", remove_tag))
+# 注册统一的按钮处理器
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 
 @asynccontextmanager
