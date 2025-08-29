@@ -16,10 +16,11 @@ from telegram.ext import (
 from fastapi import FastAPI, Request, Response
 
 # --- 导入所有模块和处理器 ---
-from database import init_pool, create_tables, db_cursor
+# 注意：我们现在导入 db_transaction 和所有新的 admin 函数
+from database import init_pool, create_tables, db_transaction
 from handlers.reputation import handle_nomination
 from handlers.leaderboard import show_leaderboard
-from handlers.admin import set_admin, list_tags, add_tag, remove_tag
+from handlers.admin import set_admin, list_tags, add_tag, remove_tag, is_admin, settings_menu, set_setting_prompt, process_setting_input
 from handlers.favorites import my_favorites, handle_favorite_button
 
 # --- 日志和环境变量设置 ---
@@ -40,8 +41,9 @@ async def grant_creator_admin_privileges(app: Application):
     if not CREATOR_ID: return
     try:
         creator_id = int(CREATOR_ID)
-        async with db_cursor() as cur:
-            await cur.execute(
+        # 使用事务来确保写入成功
+        async with db_transaction() as conn:
+            await conn.execute(
                 "INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE",
                 creator_id,
             )
@@ -54,19 +56,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     处理 /help 命令和“返回主菜单”按钮。
     为管理员和普通用户显示不同的内容。
     """
-    is_admin_user = False
-    try:
-        async with db_cursor() as cur:
-            await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
-            user_data = await cur.fetchrow("SELECT is_admin FROM users WHERE id = $1", update.effective_user.id)
-            if user_data:
-                is_admin_user = user_data['is_admin']
-    except Exception as e:
-        logger.error(f"查询用户权限时出错: {e}")
+    user_is_admin = await is_admin(update.effective_user.id)
 
     text = "你好！我是万物信誉机器人。\n\n**使用方法:**\n1. 直接在群里发送 `查询 @任意符号` 来查看或评价一个符号。\n2. 使用下方的按钮来浏览排行榜或你的个人收藏。"
     
-    if is_admin_user:
+    if user_is_admin:
         text += (
             "\n\n--- *管理员面板* ---\n"
             "以下为文本命令，请直接发送:\n"
@@ -76,12 +70,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
             "`/removetag <标签>`"
         )
 
-    # --- 核心改造：移除按钮上多余的命令文本，追求极致的优雅 ---
     keyboard = [
         [InlineKeyboardButton("🏆 推荐榜", callback_data="show_leaderboard_top_1")],
         [InlineKeyboardButton("☠️ 拉黑榜", callback_data="show_leaderboard_bottom_1")],
         [InlineKeyboardButton("⭐ 我的收藏", callback_data="show_my_favorites")]
     ]
+    # 为管理员添加“世界设置”按钮
+    if user_is_admin:
+        keyboard.append([InlineKeyboardButton("⚙️ 世界设置", callback_data="admin_settings_menu")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -92,8 +88,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令，确保用户存在后显示帮助菜单。"""
-    async with db_cursor() as cur:
-        await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
+    async with db_transaction() as conn:
+        await conn.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
     await help_command(update, context)
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,7 +100,12 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     action = data[0]
     
     try:
-        if action == "show":
+        if action == "admin":
+            if data[1] == "settings" and data[2] == "menu":
+                await settings_menu(update, context)
+            elif data[1] == "set":
+                await set_setting_prompt(update, context, setting_type=data[2])
+        elif action == "show":
             if data[1] == "leaderboard":
                 await show_leaderboard(update, context, board_type=data[2], page=int(data[3]))
             elif data[1] == "my":
@@ -133,9 +134,9 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- PTB 应用设置 ---
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 
-ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination))
 ptb_app.add_handler(CommandHandler("start", start_command))
 ptb_app.add_handler(CommandHandler("help", help_command))
+ptb_app.add_handler(CommandHandler("settings", settings_menu)) # 注册 /settings 命令
 ptb_app.add_handler(CommandHandler("top", lambda u, c: show_leaderboard(u, c, 'top', 1)))
 ptb_app.add_handler(CommandHandler("bottom", lambda u, c: show_leaderboard(u, c, 'bottom', 1)))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
@@ -144,6 +145,11 @@ ptb_app.add_handler(CommandHandler("listtags", list_tags))
 ptb_app.add_handler(CommandHandler("addtag", add_tag))
 ptb_app.add_handler(CommandHandler("removetag", remove_tag))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
+# 这个 MessageHandler 必须有高优先级 (group=1)，以避免被其他文本处理器覆盖
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_setting_input), group=1)
+# 查询处理器优先级较低 (group=2)
+ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination), group=2)
+
 
 # --- FastAPI 与 PTB 集成 ---
 @asynccontextmanager
