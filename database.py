@@ -39,11 +39,12 @@ async def create_tables():
                 is_admin BOOLEAN DEFAULT FALSE
             );
         """)
+        # username 字段迁移必须加异常处理，否则会导致整个事务失败
         try:
             await conn.execute("ALTER TABLE users ADD COLUMN username TEXT;")
             logger.info("✅ (数据库迁移) 'users' 表已成功添加 'username' 字段。")
-        except asyncpg.exceptions.DuplicateColumnError:
-            pass
+        except Exception as e:
+            logger.warning(f"(数据库迁移) 添加 'username' 字段失败，可能已存在: {e}")
 
         # --- reputation_profiles 表 ---
         await conn.execute("""
