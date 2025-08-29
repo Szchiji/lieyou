@@ -4,14 +4,12 @@ from psycopg2.extras import DictCursor
 
 from database import get_conn, put_conn, get_user_rank
 from constants import TYPE_HUNT, TYPE_TRAP
+from handlers.decorators import restricted_to_group
 
+@restricted_to_group
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示用户自己的或被回复用户的个人档案。"""
-    target_user = None
-    if update.effective_message.reply_to_message:
-        target_user = update.effective_message.reply_to_message.from_user
-    else:
-        target_user = update.effective_user
+    target_user = update.effective_message.reply_to_message.from_user if update.effective_message.reply_to_message else update.effective_user
 
     conn = get_conn()
     try:
@@ -26,13 +24,11 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rep = user_data['reputation']
             rank = get_user_rank(rep)
 
-            # 统计狩猎记录
             cur.execute(f"SELECT COUNT(*) FROM feedback WHERE marker_id = %s AND type = '{TYPE_HUNT}'", (target_user.id,))
             hunts_made = cur.fetchone()[0]
             cur.execute(f"SELECT COUNT(*) FROM feedback WHERE marker_id = %s AND type = '{TYPE_TRAP}'", (target_user.id,))
             traps_marked = cur.fetchone()[0]
 
-            # 统计战利品
             cur.execute(f"SELECT COUNT(f.id) FROM feedback f JOIN resources r ON f.resource_id = r.id WHERE r.sharer_id = %s AND f.type = '{TYPE_HUNT}'", (target_user.id,))
             hunted_count = cur.fetchone()[0]
             cur.execute(f"SELECT COUNT(f.id) FROM feedback f JOIN resources r ON f.resource_id = r.id WHERE r.sharer_id = %s AND f.type = '{TYPE_TRAP}'", (target_user.id,))
@@ -52,9 +48,3 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(profile_text, parse_mode='Markdown')
     finally:
         put_conn(conn)
-# ... (其他导入) ...
-from handlers.decorators import restricted_to_group
-
-@restricted_to_group
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (函数内部代码保持不变) ...
