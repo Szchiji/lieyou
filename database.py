@@ -31,64 +31,66 @@ async def db_cursor():
         if conn: await POOL.release(conn)
 
 async def create_tables():
-    """最终的、绝对正确的数据库初始化程序。"""
+    """最终的、为“符号信誉系统”设计的数据库初始化程序。"""
     async with db_cursor() as cur:
-        logger.info("正在执行最终的数据库结构审查与修正...")
+        logger.info("正在执行最终的数据库结构审查与重建...")
         try:
-            # --- 用户表：最终形态 ---
+            # --- 1. 为管理员功能保留一个简单的 users 表 ---
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    id BIGINT PRIMARY KEY, username VARCHAR(255), full_name VARCHAR(255),
+                    id BIGINT PRIMARY KEY,
                     is_admin BOOLEAN DEFAULT FALSE
                 );
             """)
-            try: await cur.execute("ALTER TABLE users ADD COLUMN recommend_count INT DEFAULT 0;")
-            except asyncpg.exceptions.DuplicateColumnError: pass
-            try: await cur.execute("ALTER TABLE users ADD COLUMN block_count INT DEFAULT 0;")
-            except asyncpg.exceptions.DuplicateColumnError: pass
-            try: await cur.execute("ALTER TABLE users DROP COLUMN reputation;")
-            except asyncpg.exceptions.UndefinedColumnError: pass
 
-            # --- 标签表：最终形态（驱魔核心）---
-            # 1. 先尝试删除可能存在的、错误的旧表
-            await cur.execute("DROP TABLE IF EXISTS tags CASCADE;")
-            logger.info("已移除可能存在错误的旧 `tags` 表，准备重建。")
+            # --- 2. 核心改造：创建“符号档案”表 ---
+            # 为了确保干净，先删除所有可能存在的旧表
+            await cur.execute("DROP TABLE IF EXISTS favorites CASCADE;")
+            await cur.execute("DROP TABLE IF EXISTS votes CASCADE;")
+            await cur.execute("DROP TABLE IF EXISTS reputation_profiles CASCADE;")
+            # 也删除旧的 users 表的列，以防万一
+            try:
+                await cur.execute("ALTER TABLE users DROP COLUMN username;")
+                await cur.execute("ALTER TABLE users DROP COLUMN full_name;")
+                await cur.execute("ALTER TABLE users DROP COLUMN recommend_count;")
+                await cur.execute("ALTER TABLE users DROP COLUMN block_count;")
+            except asyncpg.exceptions.UndefinedColumnError:
+                pass
+
+            logger.info("已移除所有旧的、与用户相关的表和列，准备重建为“符号系统”。")
             
-            # 2. 创建100%正确的 `tags` 表
             await cur.execute("""
-                CREATE TABLE tags (
+                CREATE TABLE reputation_profiles (
+                    username VARCHAR(255) PRIMARY KEY,
+                    recommend_count INT NOT NULL DEFAULT 0,
+                    block_count INT NOT NULL DEFAULT 0
+                );
+            """)
+            logger.info("🎉 已成功创建核心的 `reputation_profiles` 表！")
+
+            # --- 3. 标签表 (保持不变) ---
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS tags (
                     id SERIAL PRIMARY KEY,
                     tag_name VARCHAR(255) UNIQUE NOT NULL,
                     type VARCHAR(50) NOT NULL CHECK (type IN ('recommend', 'block'))
                 );
             """)
-            logger.info("🎉 已成功创建 100% 正确的 `tags` 表！")
 
-            # --- 投票表：最终形态 ---
-            # 同样重建，以确保外键约束正确无误
-            await cur.execute("DROP TABLE IF EXISTS votes CASCADE;")
+            # --- 4. 投票表 (改造以适应新核心) ---
             await cur.execute("""
                 CREATE TABLE votes (
                     id SERIAL PRIMARY KEY,
-                    nominator_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
-                    nominee_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+                    nominator_id BIGINT NOT NULL,
+                    nominee_username VARCHAR(255) REFERENCES reputation_profiles(username) ON DELETE CASCADE,
                     tag_id INT REFERENCES tags(id) ON DELETE CASCADE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(nominator_id, nominee_id, tag_id)
+                    UNIQUE(nominator_id, nominee_username, tag_id)
                 );
             """)
-            logger.info("🎉 已成功创建 100% 正确的 `votes` 表！")
+            logger.info("🎉 已成功创建适配“符号系统”的 `votes` 表！")
 
-            # --- 收藏夹表：最终形态 ---
-            await cur.execute("""
-                CREATE TABLE IF NOT EXISTS favorites (
-                    id SERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id),
-                    favorite_user_id BIGINT REFERENCES users(id),
-                    UNIQUE(user_id, favorite_user_id)
-                );
-            """)
-
-            logger.info("✅✅✅ 所有数据库表都已达到最终的、完美的状态！")
+            logger.info("✅✅✅ 所有数据库表都已达到最终的、完美的“符号信誉系统”状态！")
         except Exception as e:
-            logger.error(f"❌ 在最终的数据库修正过程中发生严重错误: {e}", exc_info=True)
+            logger.error(f"❌ 在最终的数据库重建过程中发生严重错误: {e}", exc_info=True)
             raise
