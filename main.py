@@ -32,12 +32,9 @@ async def grant_creator_admin_privileges(app: Application):
     if not CREATOR_ID: return
     try:
         creator_id = int(CREATOR_ID)
-        # 修复: 从 get_chat 获取 Chat 对象后, 手动创建 User 对象
         chat = await app.bot.get_chat(creator_id)
         creator_user = User(id=chat.id, first_name=chat.first_name, is_bot=False, username=chat.username)
-        
         await register_user_if_not_exists(creator_user)
-
         with db_cursor() as cur:
             cur.execute("UPDATE users SET is_admin = TRUE WHERE id = %s", (creator_id,))
             logger.info(f"✅ 创世神 {creator_id} 已被自动授予管理员权限。")
@@ -58,10 +55,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data = cur.fetchone()
         if user_data: is_admin = user_data['is_admin']
     
-    user_help = "...\n*用户命令:*\n`查询 @username` \\- 查询用户信誉并发起评价\\.\n`/top` 或 `/红榜` \\- 查看推荐排行榜\\.\n`/bottom` 或 `/黑榜` \\- 查看拉黑排行榜\\.\n`/myfavorites` \\- 查看你的个人收藏夹（私聊发送）\\.\n`/myprofile` \\- 查看你自己的声望和收到的标签\\.\n`/help` \\- 显示此帮助信息\\."
-    admin_help = "\n*管理员命令:*\n`/setadmin <user_id>` \\- 设置一个用户为管理员\\.\n`/listtags` \\- 列出所有可用的评价标签\\.\n`/addtag <推荐|拉黑> <标签>` \\- 添加一个新的评价标签\\.\n`/removetag <标签>` \\- 移除一个评价标签\\."
+    # 修复: 移除所有 MarkdownV2 格式，改用普通的纯文本，保证100%成功发送
+    user_help = (
+        "用户命令:\n"
+        "查询 @username - 查询用户信誉并发起评价。\n"
+        "/top 或 /红榜 - 查看推荐排行榜。\n"
+        "/bottom 或 /黑榜 - 查看拉黑排行榜。\n"
+        "/myfavorites - 查看你的个人收藏夹（私聊发送）。\n"
+        "/myprofile - 查看你自己的声望和收到的标签。\n"
+        "/help - 显示此帮助信息。"
+    )
+    admin_help = (
+        "\n\n管理员命令:\n"
+        "/setadmin <user_id> - 设置一个用户为管理员。\n"
+        "/listtags - 列出所有可用的评价标签。\n"
+        "/addtag <推荐|拉黑> <标签> - 添加一个新的评价标签。\n"
+        "/removetag <标签> - 移除一个评价标签。"
+    )
+    
     full_help_text = user_help + (admin_help if is_admin else "")
-    await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
+    # 修复: 移除 parse_mode 参数
+    await update.message.reply_text(full_help_text)
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -98,7 +112,6 @@ async def post_init(application: Application):
         logger.critical(f"❌ 在 post_init 阶段发生致命错误: {e}")
 
 async def main() -> None:
-    # --- 初始化数据库 ---
     try:
         init_pool()
         create_tables()
@@ -107,10 +120,8 @@ async def main() -> None:
         logger.critical(f"❌ 数据库初始化失败，程序终止: {e}")
         return
 
-    # --- 初始化 Telegram Application ---
     ptb_app = Application.builder().token(TOKEN).build()
     
-    # --- 注册处理器 ---
     ptb_app.add_handler(MessageHandler((filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention'), handle_nomination))
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("help", help_command))
@@ -127,7 +138,6 @@ async def main() -> None:
     ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
     logger.info("✅ 所有 Telegram 处理器已注册。")
 
-    # --- 创建一个 FastAPI 应用来包装 PTB ---
     from fastapi import FastAPI, Request, Response
     
     fastapi_app = FastAPI()
@@ -136,7 +146,7 @@ async def main() -> None:
     async def startup_event():
         logger.info("FastAPI 应用启动，初始化 PTB...")
         await ptb_app.initialize()
-        await post_init(ptb_app) # 手动调用 post_init
+        await post_init(ptb_app)
         await ptb_app.start()
         logger.info("✅ PTB 应用已在后台启动。")
 
@@ -147,12 +157,10 @@ async def main() -> None:
         await ptb_app.shutdown()
         logger.info("✅ PTB 应用已停止。")
 
-    # 健康检查端点
     @fastapi_app.get("/")
     async def health_check():
         return {"status": "OK, I am alive!"}
 
-    # Webhook 端点
     @fastapi_app.post(f"/{TOKEN}")
     async def process_telegram_update(request: Request):
         try:
@@ -164,7 +172,6 @@ async def main() -> None:
             logger.error(f"处理更新时发生错误: {e}")
             return Response(status_code=500)
 
-    # --- 启动服务器 ---
     logger.info("🚀 准备启动 Uvicorn 服务器...")
     config = uvicorn.Config(app=fastapi_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
