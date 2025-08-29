@@ -25,3 +25,9 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(board_text, parse_mode='Markdown')
     finally:
         put_conn(conn)
+# ... (其他导入) ...
+from handlers.decorators import restricted_to_group
+
+@restricted_to_group
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (函数内部代码保持不变) ...
