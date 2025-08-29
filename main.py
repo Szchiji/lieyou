@@ -18,7 +18,8 @@ from fastapi import FastAPI, Request, Response
 from database import init_pool, create_tables
 from handlers.reputation import (
     handle_nomination, button_handler as reputation_button_handler,
-    show_reputation_summary, show_reputation_details, show_reputation_voters
+    show_reputation_summary, show_reputation_details, show_reputation_voters,
+    show_voters_menu # 新增导入
 )
 from handlers.leaderboard import show_leaderboard, init_cache as init_leaderboard_cache
 from handlers.admin import (
@@ -30,6 +31,7 @@ from handlers.admin import (
 )
 from handlers.favorites import my_favorites, handle_favorite_button
 
+# (常量和启动函数等保持不变)
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,15 +56,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     user_id = update.effective_user.id
     user_is_admin = await is_admin(user_id)
-    text = "你好！我是万物信誉机器人。\n\n**使用方法:**\n1. 直接在群里发送 `查询 @任意符号` 来查看或评价一个符号。\n2. 使用下方的按钮来浏览排行榜或你的个人收藏。"
+    text = "你好！我是万物信誉机器人。\n\n**使用方法:**\n1. 在群聊中发送 `查询 @用户名`\n2. 使用下方按钮浏览或管理"
     if user_is_admin:
-        text += ("\n\n--- *管理员面板* ---\n"
-                 "请使用下方的 `⚙️ 世界设置` 按钮进入可视化管理面板。")
-    keyboard = [[InlineKeyboardButton("🏆 红榜", callback_data="leaderboard_top_1")],
-                [InlineKeyboardButton("☠️ 黑榜", callback_data="leaderboard_bottom_1")],
-                [InlineKeyboardButton("⭐ 我的收藏", callback_data="show_my_favorites")]]
+        text += "\n\n您是管理员，拥有 `⚙️ 总控制台` 的访问权限。"
+    keyboard = [[InlineKeyboardButton("🏆 红榜", callback_data="leaderboard_top_1"),
+                 InlineKeyboardButton("☠️ 黑榜", callback_data="leaderboard_bottom_1")],
+                [InlineKeyboardButton("🌟 我的收藏", callback_data="show_my_favorites")]]
     if user_is_admin:
-        keyboard.append([InlineKeyboardButton("⚙️ 世界设置", callback_data="admin_settings_menu")])
+        keyboard.append([InlineKeyboardButton("⚙️ 总控制台", callback_data="admin_settings_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     message_content = {'text': text, 'reply_markup': reply_markup, 'parse_mode': 'Markdown'}
     if from_button or (update.callback_query and update.callback_query.data == 'back_to_help'):
@@ -79,32 +80,33 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     data = query.data
     
     try:
-        # 管理员面板路由
-        if data == "admin_settings_menu": await settings_menu(update, context)
-        elif data == "admin_panel_tags": await tags_panel(update, context)
-        elif data == "admin_tags_add_recommend_prompt": await add_tag_prompt(update, context, "recommend")
-        elif data == "admin_tags_add_block_prompt": await add_tag_prompt(update, context, "block")
-        elif data.startswith("admin_tags_remove_menu_"): await remove_tag_menu(update, context, int(data.split("_")[-1]))
-        elif data.startswith("admin_tags_remove_confirm_"): await remove_tag_confirm(update, context, int(data.split("_")[-2]), int(data.split("_")[-1]))
-        elif data == "admin_tags_list": await list_all_tags(update, context) # 新增路由
-        elif data == "admin_panel_permissions": await permissions_panel(update, context)
-        elif data == "admin_perms_add_prompt": await add_admin_prompt(update, context)
-        elif data == "admin_perms_list": await list_admins(update, context)
-        elif data == "admin_perms_remove_menu": await remove_admin_menu(update, context)
-        elif data.startswith("admin_perms_remove_confirm_"): await remove_admin_confirm(update, context, int(data.split("_")[-1]))
-        elif data == "admin_panel_system": await system_settings_panel(update, context)
-        elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
+        if data.startswith("admin_"):
+            if data == "admin_settings_menu": await settings_menu(update, context)
+            elif data == "admin_panel_tags": await tags_panel(update, context)
+            elif data == "admin_tags_add_recommend_prompt": await add_tag_prompt(update, context, "recommend")
+            elif data == "admin_tags_add_block_prompt": await add_tag_prompt(update, context, "block")
+            elif data.startswith("admin_tags_remove_menu_"): await remove_tag_menu(update, context, int(data.split("_")[-1]))
+            elif data.startswith("admin_tags_remove_confirm_"): await remove_tag_confirm(update, context, int(data.split("_")[-2]), int(data.split("_")[-1]))
+            elif data == "admin_tags_list": await list_all_tags(update, context)
+            elif data == "admin_panel_permissions": await permissions_panel(update, context)
+            elif data == "admin_perms_add_prompt": await add_admin_prompt(update, context)
+            elif data == "admin_perms_list": await list_admins(update, context)
+            elif data == "admin_perms_remove_menu": await remove_admin_menu(update, context)
+            elif data.startswith("admin_perms_remove_confirm_"): await remove_admin_confirm(update, context, int(data.split("_")[-1]))
+            elif data == "admin_panel_system": await system_settings_panel(update, context)
+            elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
         
-        # 信誉档案路由
-        elif data.startswith("rep_detail_"): await show_reputation_details(update, context)
-        elif data.startswith("rep_summary_"): await show_reputation_summary(update, context)
-        elif data.startswith("rep_voters_"): await show_reputation_voters(update, context)
+        elif data.startswith("rep_"):
+            if data.startswith("rep_detail_"): await show_reputation_details(update, context)
+            elif data.startswith("rep_summary_"): await show_reputation_summary(update, context)
+            elif data.startswith("rep_voters_menu_"): await show_voters_menu(update, context) # 新增路由
+            elif data.startswith("rep_voters_"): await show_reputation_voters(update, context)
         
-        # 用户功能路由
         elif data.startswith("leaderboard_"):
             parts = data.split("_")
             if parts[1] == "noop": return
             await show_leaderboard(update, context, board_type=parts[1], page=int(parts[2]))
+        
         elif data == "show_my_favorites": await my_favorites(update, context)
         elif data.startswith("query_fav"): await handle_favorite_button(update, context)
         elif data == "back_to_help": await help_command(update, context, from_button=True)
@@ -137,7 +139,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 FastAPI 应用启动，正在初始化...")
     await init_pool()
     await create_tables()
-    await init_leaderboard_cache() # 初始化排行榜缓存
+    await init_leaderboard_cache()
     await ptb_app.bot.delete_webhook(drop_pending_updates=True)
     await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     async with ptb_app:
