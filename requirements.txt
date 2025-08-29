@@ -1,5 +1,6 @@
-python-telegram-bot[webhooks]
-python-dotenv
+python-telegram-bot
 fastapi
-uvicorn[standard]
-asyncpg>=0.28.0
+uvicorn
+asyncpg
+python-dotenv
+cachetools
