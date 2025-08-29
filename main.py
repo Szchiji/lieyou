@@ -4,7 +4,7 @@ import uvicorn
 from os import environ
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import Update, User
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from database import db_cursor, init_pool, create_tables
@@ -32,7 +32,12 @@ async def grant_creator_admin_privileges(app: Application):
     if not CREATOR_ID: return
     try:
         creator_id = int(CREATOR_ID)
-        await register_user_if_not_exists(await app.bot.get_chat(creator_id))
+        # 修复: 从 get_chat 获取 Chat 对象后, 手动创建 User 对象
+        chat = await app.bot.get_chat(creator_id)
+        creator_user = User(id=chat.id, first_name=chat.first_name, is_bot=False, username=chat.username)
+        
+        await register_user_if_not_exists(creator_user)
+
         with db_cursor() as cur:
             cur.execute("UPDATE users SET is_admin = TRUE WHERE id = %s", (creator_id,))
             logger.info(f"✅ 创世神 {creator_id} 已被自动授予管理员权限。")
@@ -45,7 +50,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("你好！欢迎使用社群信誉机器人。使用 /help 查看所有命令。")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (帮助命令内容与之前版本相同)
     user_id = update.effective_user.id
     await register_user_if_not_exists(update.effective_user)
     is_admin = False
@@ -104,7 +108,7 @@ async def main() -> None:
         return
 
     # --- 初始化 Telegram Application ---
-    ptb_app = Application.builder().token(TOKEN).post_init(post_init).build()
+    ptb_app = Application.builder().token(TOKEN).build()
     
     # --- 注册处理器 ---
     ptb_app.add_handler(MessageHandler((filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention'), handle_nomination))
@@ -132,7 +136,7 @@ async def main() -> None:
     async def startup_event():
         logger.info("FastAPI 应用启动，初始化 PTB...")
         await ptb_app.initialize()
-        await ptb_app.post_init(ptb_app)
+        await post_init(ptb_app) # 手动调用 post_init
         await ptb_app.start()
         logger.info("✅ PTB 应用已在后台启动。")
 
@@ -146,16 +150,19 @@ async def main() -> None:
     # 健康检查端点
     @fastapi_app.get("/")
     async def health_check():
-        logger.info("❤️ 收到来自 Render 的健康检查请求。")
         return {"status": "OK, I am alive!"}
 
     # Webhook 端点
     @fastapi_app.post(f"/{TOKEN}")
     async def process_telegram_update(request: Request):
-        update_data = await request.json()
-        update = Update.de_json(data=update_data, bot=ptb_app.bot)
-        await ptb_app.process_update(update)
-        return Response(status_code=200)
+        try:
+            update_data = await request.json()
+            update = Update.de_json(data=update_data, bot=ptb_app.bot)
+            await ptb_app.process_update(update)
+            return Response(status_code=200)
+        except Exception as e:
+            logger.error(f"处理更新时发生错误: {e}")
+            return Response(status_code=500)
 
     # --- 启动服务器 ---
     logger.info("🚀 准备启动 Uvicorn 服务器...")
