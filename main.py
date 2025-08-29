@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import httpx
 from os import environ
 from dotenv import load_dotenv
 from telegram import Update
@@ -19,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Webhook 模式所需的环境变量 ---
+# --- 环境变量 ---
 TOKEN = environ.get("TELEGRAM_BOT_TOKEN")
 PORT = int(environ.get('PORT', '8443'))
 RENDER_URL = environ.get('RENDER_EXTERNAL_URL')
@@ -56,25 +57,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
         user_data = cur.fetchone()
         is_admin = user_data and user_data['is_admin']
-    user_help = """
-*用户命令:*
-`查询 @username` - 查询用户信誉并发起评价.
-`/top` 或 `/红榜` - 查看推荐排行榜.
-`/bottom` 或 `/黑榜` - 查看拉黑排行榜.
-`/myfavorites` - 查看你的个人收藏夹（私聊发送）.
-`/myprofile` - 查看你自己的声望和收到的标签.
-`/help` - 显示此帮助信息.
-    """
-    admin_help = """
-*管理员命令:*
-`/setadmin <user_id>` - 设置一个用户为管理员.
-`/listtags` - 列出所有可用的评价标签.
-`/addtag <推荐|拉黑> <标签>` - 添加一个新的评价标签.
-`/removetag <标签>` - 移除一个评价标签.
-    """
-    full_help_text = user_help
-    if is_admin:
-        full_help_text += "\n" + admin_help
+    
+    user_help = "...\n*用户命令:*\n`查询 @username` \\- 查询用户信誉并发起评价\\.\n`/top` 或 `/红榜` \\- 查看推荐排行榜\\.\n`/bottom` 或 `/黑榜` \\- 查看拉黑排行榜\\.\n`/myfavorites` \\- 查看你的个人收藏夹（私聊发送）\\.\n`/myprofile` \\- 查看你自己的声望和收到的标签\\.\n`/help` \\- 显示此帮助信息\\."
+    admin_help = "\n*管理员命令:*\n`/setadmin <user_id>` \\- 设置一个用户为管理员\\.\n`/listtags` \\- 列出所有可用的评价标签\\.\n`/addtag <推荐|拉黑> <标签>` \\- 添加一个新的评价标签\\.\n`/removetag <标签>` \\- 移除一个评价标签\\."
+    
+    full_help_text = user_help + (admin_help if is_admin else "")
     await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,60 +76,52 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await leaderboard_button_handler(update, context)
     else: await query.answer("未知操作")
 
-async def post_init(application: Application):
-    """
-    在应用启动后设置 Webhook。
-    引入重试机制以解决Render平台启动初期的网络延迟问题。
-    """
-    max_retries = 5
-    retry_delay = 10  # seconds
+async def heartbeat():
+    """每隔14分钟访问一次自己的URL，防止Render服务休眠。"""
+    while True:
+        await asyncio.sleep(60 * 14)  # 等待14分钟
+        if RENDER_URL:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(RENDER_URL)
+                    logger.info(f"❤️ 心跳探测: 访问 {RENDER_URL}，状态码: {response.status_code}")
+            except Exception as e:
+                logger.error(f"❤️ 心跳探测失败: {e}")
 
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"正在尝试第 {attempt + 1}/{max_retries} 次设置 Webhook: {WEBHOOK_URL}")
-            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-            logger.info("✅ Webhook 设置成功！")
-            await grant_creator_admin_privileges()
-            return  # 成功后退出函数
-        except BadRequest as e:
-            if "invalid webhook URL specified" in str(e):
-                logger.warning(f"设置 Webhook 失败 (无效的URL)，将在 {retry_delay} 秒后重试...")
-                if attempt + 1 == max_retries:
-                    logger.critical("已达到最大重试次数，Webhook 设置失败。请检查 RENDER_EXTERNAL_URL。")
-                    raise
-                await asyncio.sleep(retry_delay)
-            else:
-                logger.error(f"设置 Webhook 时发生意外的 BadRequest: {e}")
-                raise # 其他类型的 BadRequest，直接抛出
-        except Exception as e:
-            logger.error(f"设置 Webhook 时发生未知错误: {e}")
-            raise # 其他未知错误，直接抛出
+async def post_init(application: Application):
+    """在应用启动后设置Webhook并启动心跳任务。"""
+    logger.info("正在设置 Webhook...")
+    try:
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"✅ Webhook 设置成功: {WEBHOOK_URL}")
+        await grant_creator_admin_privileges()
+        # 创建并启动心跳任务
+        asyncio.create_task(heartbeat())
+        logger.info("❤️ 心跳任务已启动。")
+    except Exception as e:
+        logger.critical(f"❌ 设置 Webhook 失败: {e}")
 
 def main() -> None:
     logger.info("机器人正在启动 (Webhook 模式)...")
-
-    if not RENDER_URL:
-        logger.critical("错误: RENDER_EXTERNAL_URL 环境变量未设置。Webhook 模式无法启动。")
+    if not TOKEN or not RENDER_URL:
+        logger.critical("错误: TELEGRAM_BOT_TOKEN 或 RENDER_EXTERNAL_URL 环境变量未设置。")
         return
 
     try:
         init_pool()
         create_tables()
     except Exception as e:
-        logger.critical(f"数据库初始化失败，机器人无法启动: {e}")
+        logger.critical(f"❌ 数据库初始化失败: {e}")
         return
 
     application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # 处理器注册
-    nomination_filter = (filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention')
-    application.add_handler(MessageHandler(nomination_filter, handle_nomination))
+    application.add_handler(MessageHandler(filters.Regex('^查询') & filters.Entity('mention'), handle_nomination))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", get_top_board))
     application.add_handler(CommandHandler("bottom", get_bottom_board))
-    application.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
-    application.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
     application.add_handler(CommandHandler("myfavorites", my_favorites))
     application.add_handler(CommandHandler("myprofile", my_profile))
     application.add_handler(CommandHandler("setadmin", set_admin))
@@ -152,13 +131,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(all_button_handler))
     
     logger.info("所有处理器已注册。正在启动 Webhook 服务器...")
-    
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL
-    )
-    
+    application.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
     logger.info("机器人已停止。")
 
 if __name__ == '__main__':
