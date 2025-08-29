@@ -11,8 +11,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
-    ContextTypes,
-    RegexHandler
+    ContextTypes
 )
 from telegram.error import TimedOut, BadRequest
 from fastapi import FastAPI, Request, Response
@@ -23,7 +22,6 @@ from handlers.reputation import (
     show_reputation_summary, show_reputation_details, show_reputation_voters,
     show_voters_menu
 )
-# 移除了 init_cache，因为我们重构了 leaderboard
 from handlers.leaderboard import show_leaderboard
 from handlers.admin import (
     is_admin, god_mode_command, settings_menu, 
@@ -68,7 +66,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     if user_is_admin:
         text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
     keyboard = [
-        # 直接链接到箴言选择界面
         [InlineKeyboardButton("🏆 英灵殿", callback_data="leaderboard_top_tagselect_1"),
          InlineKeyboardButton("☠️ 放逐深渊", callback_data="leaderboard_bottom_tagselect_1")],
         [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites")]
@@ -145,24 +142,18 @@ ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privi
 ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
 ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
 ptb_app.add_handler(CommandHandler("cancel", cancel_command))
-# 移除了 /top 和 /bottom 命令，因为它们现在需要选择箴言
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
 
-nomination_pattern = r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))'
-ptb_app.add_handler(RegexHandler(
-    nomination_pattern,
-    handle_nomination,
-    filters=~filters.COMMAND & filters.ChatType.GROUPS
-))
+nomination_pattern = r'@(\w{5,})|查询\s*@(\w{5,})'
+ptb_app.add_handler(MessageHandler(filters.Regex(nomination_pattern) & ~filters.COMMAND & filters.ChatType.GROUPS, handle_nomination))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 FastAPI 应用启动，正在初始化...")
     await init_pool()
     await create_tables()
-    # 不再需要初始化缓存
     await ptb_app.bot.delete_webhook(drop_pending_updates=True)
     await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     async with ptb_app:
