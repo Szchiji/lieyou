@@ -36,16 +36,26 @@ async def grant_creator_admin_privileges(app: Application):
     try:
         creator_id = int(CREATOR_ID)
         async with db_transaction() as conn:
-            await conn.execute(
-                "INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE",
-                creator_id,
-            )
+            # 确保创世神在 users 表中存在，然后再更新权限
+            await conn.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", creator_id)
         logger.info(f"✅ 创世神 {creator_id} 已被自动授予管理员权限。")
     except Exception as e:
         logger.error(f"❌ 授予创世神权限时发生错误: {e}", exc_info=True)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool = False):
-    user_is_admin = await is_admin(update.effective_user.id)
+    """
+    处理 /help 命令和“返回主菜单”按钮。
+    在检查权限前，确保用户已在数据库中注册。
+    """
+    user_id = update.effective_user.id
+    
+    # --- 核心黑洞修复：在检查权限之前，先为用户“登记在册”！ ---
+    async with db_transaction() as conn:
+        await conn.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", user_id)
+    
+    # 现在，我们可以安全地检查权限了
+    user_is_admin = await is_admin(user_id)
+    
     text = "你好！我是万物信誉机器人。\n\n**使用方法:**\n1. 直接在群里发送 `查询 @任意符号` 来查看或评价一个符号。\n2. 使用下方的按钮来浏览排行榜或你的个人收藏。"
     
     if user_is_admin:
@@ -71,11 +81,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     else:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
+# --- start_command 保持不变 ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    async with db_transaction() as conn:
-        await conn.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
+    # help_command 现在已经包含了用户注册逻辑，所以这里可以简化
     await help_command(update, context)
 
+# --- all_button_handler 保持不变 ---
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -113,6 +124,7 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"处理按钮回调 {query.data} 时发生错误: {e}", exc_info=True)
 
+# --- PTB 应用设置 (保持不变) ---
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 ptb_app.add_handler(CommandHandler("start", start_command))
 ptb_app.add_handler(CommandHandler("help", help_command))
@@ -128,6 +140,7 @@ ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_setting_input), group=1)
 ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination), group=2)
 
+# --- FastAPI 与 PTB 集成 (保持不变) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 FastAPI 应用启动，正在初始化...")
