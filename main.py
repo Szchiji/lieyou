@@ -17,6 +17,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Webhook 模式所需的环境变量 ---
+TOKEN = environ.get("TELEGRAM_BOT_TOKEN")
+# Render 会自动提供 PORT 和 RENDER_EXTERNAL_URL
+PORT = int(environ.get('PORT', '8443'))
+WEBHOOK_URL = f"{environ.get('RENDER_EXTERNAL_URL')}/{TOKEN}"
+
+
 async def grant_creator_admin_privileges():
     creator_id_str = environ.get("CREATOR_ID")
     if not creator_id_str: return
@@ -82,10 +89,12 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else: await query.answer("未知操作")
 
 async def post_init(application: Application):
+    """在应用启动后设置 Webhook 并授予创世神权限。"""
+    await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     await grant_creator_admin_privileges()
 
 def main() -> None:
-    logger.info("机器人正在启动...")
+    logger.info("机器人正在启动 (Webhook 模式)...")
     try:
         init_pool()
         create_tables()
@@ -93,11 +102,12 @@ def main() -> None:
         logger.critical(f"数据库初始化失败，机器人无法启动: {e}")
         return
 
-    application = Application.builder().token(environ["TELEGRAM_BOT_TOKEN"]).post_init(post_init).build()
+    # --- 核心改动：使用 Webhook 模式配置 Application ---
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
     
+    # 处理器注册保持不变
     nomination_filter = (filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention')
     application.add_handler(MessageHandler(nomination_filter, handle_nomination))
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", get_top_board))
@@ -112,12 +122,14 @@ def main() -> None:
     application.add_handler(CommandHandler("removetag", remove_tag))
     application.add_handler(CallbackQueryHandler(all_button_handler))
     
-    logger.info("所有处理器已注册。正在开始轮询...")
-    
-    # --- 核心修复：添加 drop_pending_updates=True ---
-    # 这会告诉机器人在开始轮询前，清除掉所有在它离线时收到的旧消息。
-    # 这能有效解决因部署重叠导致的 Conflict 错误。
-    application.run_polling(drop_pending_updates=True)
+    logger.info("所有处理器已注册。正在启动 Webhook 服务器...")
+
+    # --- 核心改动：启动 Webhook 服务器而不是轮询 ---
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=WEBHOOK_URL
+    )
     
     logger.info("机器人已停止。")
 
