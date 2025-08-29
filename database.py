@@ -62,6 +62,17 @@ async def create_tables():
                     type VARCHAR(50) NOT NULL CHECK (type IN ('recommend', 'block'))
                 );
             """)
+            
+            # --- 核心修复 2：为 tags 表执行“更名手术” ---
+            try:
+                # 检查是否存在错误的 `tag_type` 列，并将其更名为正确的 `tag_name`
+                await cur.execute("ALTER TABLE tags RENAME COLUMN tag_type TO tag_name;")
+                logger.info("🎉 成功！已将历史遗留的 `tags.tag_type` 字段更名为 `tags.tag_name`。")
+            except asyncpg.exceptions.UndefinedColumnError:
+                pass # 字段名已经是正确的，无需操作
+            except asyncpg.exceptions.DuplicateColumnError:
+                pass # 正确的字段已存在，无需操作
+
 
             # --- 投票表 ---
             await cur.execute("""
@@ -73,10 +84,10 @@ async def create_tables():
                 );
             """)
             
-            # --- 核心修复：执行“更名手术”，修正历史遗留的笔误 ---
+            # --- 核心修复 1：为 votes 表执行“更名手术” ---
             try:
                 await cur.execute("ALTER TABLE votes RENAME COLUMN target_id TO tag_id;")
-                logger.info("🎉 成功！已将历史遗留的 target_id 字段更名为 tag_id。")
+                logger.info("🎉 成功！已将历史遗留的 `votes.target_id` 字段更名为 `votes.tag_id`。")
             except asyncpg.exceptions.UndefinedColumnError:
                 pass # 字段名已经是正确的，无需操作
 
