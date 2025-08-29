@@ -26,6 +26,8 @@ async def set_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_conn()
         try:
             with conn.cursor() as cur:
+                # 确保用户存在
+                cur.execute("INSERT INTO users (id, username, first_name) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING", (target_user.id, target_user.username, target_user.first_name))
                 cur.execute("UPDATE users SET reputation = %s WHERE id = %s", (new_rep, target_user.id))
                 conn.commit()
                 await update.message.reply_text(f"已将 @{target_user.username} 的声望设置为 {new_rep}。")
