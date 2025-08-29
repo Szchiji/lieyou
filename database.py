@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 pool = None
 
 async def init_pool():
+    """Initializes the asynchronous database connection pool."""
     global pool
     if pool: return
     try:
@@ -18,10 +19,7 @@ async def init_pool():
 
 @asynccontextmanager
 async def db_transaction():
-    """
-    提供一个数据库事务的上下文管理器。
-    这是本次修复的核心，确保数据写入的原子性。
-    """
+    """Provides a database transaction context manager."""
     if not pool:
         raise ConnectionError("数据库连接池未初始化。")
     async with pool.acquire() as connection:
@@ -31,9 +29,11 @@ async def db_transaction():
             logger.debug("事务提交。")
 
 async def create_tables():
-    """创建所有必要的数据库表。"""
+    """Creates all necessary database tables if they don't exist."""
     logger.info("正在执行最终的数据库结构审查与重建...")
     async with db_transaction() as conn:
+        # We drop tables to ensure a clean slate on major structural changes.
+        # For production, a more robust migration system would be used.
         await conn.execute("DROP TABLE IF EXISTS votes, tags, reputation_profiles, users, favorites, settings CASCADE;")
         logger.info("已移除所有旧的核心数据表，准备重建为“万物信誉系统”。")
         
@@ -81,6 +81,7 @@ async def create_tables():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );""")
+        # Default settings
         await conn.execute("INSERT INTO settings (key, value) VALUES ('auto_close_delay', '-1') ON CONFLICT DO NOTHING;")
         await conn.execute("INSERT INTO settings (key, value) VALUES ('leaderboard_cache_ttl', '300') ON CONFLICT DO NOTHING;")
         logger.info("🎉 已成功创建并初始化 `settings` 表！")
