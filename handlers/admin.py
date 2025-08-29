@@ -19,7 +19,9 @@ def admin_required(func):
         if user_data and user_data['is_admin']:
             return await func(update, context, *args, **kwargs)
         else:
-            await update.message.reply_text("❌ 抱歉，此命令仅限管理员使用。")
+            # 对非管理员，静默处理或只在私聊中提示
+            if update.message.chat.type == 'private':
+                await update.message.reply_text("❌ 抱歉，此命令仅限管理员使用。")
             return
     return wrapped
 
@@ -52,11 +54,11 @@ async def list_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("标签库是空的。")
             return
         
-        text = "🏷️ **当前标签库:**\n\n"
+        text = "🏷️ *当前标签库:*\n\n"
         text += "*推荐类 (👍):*\n"
-        text += "\n".join([f"- `{tag['tag_text']}`" for tag in tags if tag['tag_type'] == 1])
+        text += "\n".join([f"\- `{tag['tag_text']}`" for tag in tags if tag['tag_type'] == 1])
         text += "\n\n*拉黑类 (👎):*\n"
-        text += "\n".join([f"- `{tag['tag_text']}`" for tag in tags if tag['tag_type'] == -1])
+        text += "\n".join([f"\- `{tag['tag_text']}`" for tag in tags if tag['tag_type'] == -1])
         
         await update.message.reply_text(text, parse_mode='MarkdownV2')
 
@@ -85,9 +87,9 @@ async def add_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except IndexError:
         await update.message.reply_text("格式错误。用法: /addtag <推荐|拉黑> <标签内容>")
 
-@admin_redacted
+@admin_required
 async def remove_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """移除一个标签。"""
+    """移除一个标签。(修正了装饰器名称)"""
     try:
         tag_text = " ".join(context.args)
         if not tag_text:
