@@ -19,7 +19,7 @@ from database import init_pool, create_tables
 from handlers.reputation import (
     handle_nomination, button_handler as reputation_button_handler,
     show_reputation_summary, show_reputation_details, show_reputation_voters,
-    show_voters_menu # 新增导入
+    show_voters_menu
 )
 from handlers.leaderboard import show_leaderboard, init_cache as init_leaderboard_cache
 from handlers.admin import (
@@ -31,7 +31,6 @@ from handlers.admin import (
 )
 from handlers.favorites import my_favorites, handle_favorite_button
 
-# (常量和启动函数等保持不变)
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -99,7 +98,7 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif data.startswith("rep_"):
             if data.startswith("rep_detail_"): await show_reputation_details(update, context)
             elif data.startswith("rep_summary_"): await show_reputation_summary(update, context)
-            elif data.startswith("rep_voters_menu_"): await show_voters_menu(update, context) # 新增路由
+            elif data.startswith("rep_voters_menu_"): await show_voters_menu(update, context)
             elif data.startswith("rep_voters_"): await show_reputation_voters(update, context)
         
         elif data.startswith("leaderboard_"):
@@ -151,6 +150,13 @@ async def lifespan(app: FastAPI):
 
 def main():
     fastapi_app = FastAPI(lifespan=lifespan)
+
+    # --- 新增的“迎宾员” ---
+    @fastapi_app.get("/", include_in_schema=False)
+    async def health_check():
+        """为Render的健康检查提供一个有效的200 OK响应。"""
+        return {"status": "ok", "message": "Bot is running"}
+
     @fastapi_app.post(f"/{TOKEN}", include_in_schema=False)
     async def process_telegram_update(request: Request):
         try:
@@ -160,6 +166,7 @@ def main():
         except Exception as e:
             logger.error(f"处理 Webhook 更新时发生严重错误: {e}", exc_info=True)
             return Response(status_code=500)
+    
     uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
