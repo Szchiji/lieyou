@@ -5,7 +5,6 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 from database import init_pool, create_tables
-# 注意这里的导入变化
 from handlers.reputation import handle_mention_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
 from handlers.profile import my_favorites, my_profile
@@ -82,8 +81,9 @@ def main() -> None:
     
     # --- 核心变化在这里 ---
     # 监听所有以'评价'或'nominate'开头的，并且包含 @mention 的消息
+    # 修正: filters.Text -> filters.TEXT
     nomination_filter = (
-        filters.Text & (filters.Regex('^评价') | filters.Regex('^nominate')) & filters.Entity('mention')
+        filters.TEXT & (filters.Regex('^评价') | filters.Regex('^nominate')) & filters.Entity('mention')
     )
     application.add_handler(MessageHandler(nomination_filter, handle_mention_nomination))
 
