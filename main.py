@@ -13,7 +13,6 @@ from database import init_pool, create_tables, db_cursor
 from handlers.reputation import handle_nomination, button_handler as reputation_button_handler
 from handlers.leaderboard import get_top_board, get_bottom_board, show_leaderboard
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
-# 核心修复：导入全新的收藏夹处理器
 from handlers.favorites import my_favorites, handle_favorite_button
 
 # --- 日志和环境变量设置 ---
@@ -53,7 +52,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_data: is_admin_user = user_data['is_admin']
     except Exception as e: logger.error(f"查询用户权限时出错: {e}")
 
-    # 核心修复：将 /myfavorites 加入帮助信息
     user_help = (
         "**用户命令:**\n"
         "`查询 @任意符号` - 查询某个符号的信誉并发起评价。\n"
@@ -76,17 +74,14 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """统一的按钮回调调度中心。"""
     query = update.callback_query
     await query.answer()
-
     data = query.data.split('_')
     action_type = data[0]
-
     try:
         if action_type in ["vote", "tag"]:
             await reputation_button_handler(update, context)
         elif action_type == "leaderboard":
             if data[1] == "noop": return
             await show_leaderboard(update, context, board_type=data[1], page=int(data[2]))
-        # 核心修复：将 fav 和 query_fav 类型的按钮点击，都交给收藏夹处理器
         elif action_type in ["fav", "query"]:
             await handle_favorite_button(update, context)
         else:
@@ -107,9 +102,11 @@ async def lifespan(app: FastAPI):
     ptb_app.add_handler(MessageHandler(filters.Regex('^查询'), handle_nomination))
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("help", help_command))
-    ptb_app.add_handler(CommandHandler(["top", "红榜"], get_top_board))
-    ptb_app.add_handler(CommandHandler(["bottom", "黑榜"], get_bottom_board))
-    # 核心修复：注册 /myfavorites 命令处理器
+    # --- 核心修复：将中文命令交给正确的处理器 ---
+    ptb_app.add_handler(CommandHandler("top", get_top_board))
+    ptb_app.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
+    ptb_app.add_handler(CommandHandler("bottom", get_bottom_board))
+    ptb_app.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
     ptb_app.add_handler(CommandHandler("setadmin", set_admin))
     ptb_app.add_handler(CommandHandler("listtags", list_tags))
@@ -134,7 +131,9 @@ def main():
     @fastapi_app.post(f"/{TOKEN}", include_in_schema=False)
     async def process_telegram_update(request: Request):
         try:
-            await request.app.state.ptb_app.update_queue.put(Update.de_json(await request.json(), request.app.state.ptb_app.bot))
+            ptb_app = request.app.state.ptb_app
+            update = Update.de_json(data=await request.json(), bot=ptb_app.bot)
+            await ptb_app.process_update(update)
             return Response(status_code=200)
         except Exception as e:
             logger.error(f"处理 Webhook 更新时发生严重错误: {e}", exc_info=True)
