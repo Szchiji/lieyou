@@ -6,7 +6,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 from database import init_pool, create_tables
 from handlers.reputation import handle_nomination_via_reply, button_handler as reputation_button_handler, register_user_if_not_exists
-from handlers.leaderboard import get_leaderboard_page, leaderboard_button_handler
+from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
 from handlers.profile import my_favorites, my_profile
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
 
@@ -33,8 +33,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
     **用户命令:**
     /nominate - (回复消息使用) 提名一个用户进行评价。
-    /top - 查看推荐排行榜（红榜）。
-    /bottom - 查看拉黑排行榜（黑榜）。
+    /top 或 /红榜 - 查看推荐排行榜。
+    /bottom 或 /黑榜 - 查看拉黑排行榜。
     /myfavorites - 查看你的个人收藏夹（私聊发送）。
     /myprofile - 查看你自己的声望和收到的标签。
     /help - 显示此帮助信息。
@@ -57,7 +57,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await reputation_button_handler(update, context)
     elif action == "leaderboard":
         await leaderboard_button_handler(update, context)
-    # 其他模块的按钮可以在这里添加
     else:
         await query.answer("未知操作")
 
@@ -80,9 +79,14 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("nominate", handle_nomination_via_reply))
     
-    application.add_handler(CommandHandler(["top", "红榜"], get_leaderboard_page))
-    application.add_handler(CommandHandler(["bottom", "黑榜"], get_leaderboard_page))
+    # 使用 CommandHandler 处理英文命令
+    application.add_handler(CommandHandler("top", get_top_board))
+    application.add_handler(CommandHandler("bottom", get_bottom_board))
     
+    # 使用 MessageHandler + Regex 过滤器处理中文命令
+    application.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
+    application.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
+
     application.add_handler(CommandHandler("myfavorites", my_favorites))
     application.add_handler(CommandHandler("myprofile", my_profile))
     
@@ -95,8 +99,9 @@ def main() -> None:
     # 注册总按钮处理器
     application.add_handler(CallbackQueryHandler(all_button_handler))
     
-    logger.info("所有处理器已注册。")
+    logger.info("所有处理器已注册。正在开始轮询...")
     application.run_polling()
+    logger.info("机器人已停止。")
 
 if __name__ == '__main__':
     main()
