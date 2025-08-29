@@ -1,8 +1,10 @@
 import logging
+import asyncio
 from os import environ
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.error import BadRequest
 
 from database import db_cursor, init_pool, create_tables
 from handlers.reputation import handle_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
@@ -20,9 +22,8 @@ logger = logging.getLogger(__name__)
 # --- Webhook 模式所需的环境变量 ---
 TOKEN = environ.get("TELEGRAM_BOT_TOKEN")
 PORT = int(environ.get('PORT', '8443'))
-# Render 会自动提供 RENDER_EXTERNAL_URL
 RENDER_URL = environ.get('RENDER_EXTERNAL_URL')
-
+WEBHOOK_URL = f"{RENDER_URL}/{TOKEN}"
 
 async def grant_creator_admin_privileges():
     creator_id_str = environ.get("CREATOR_ID")
@@ -57,19 +58,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_admin = user_data and user_data['is_admin']
     user_help = """
 *用户命令:*
-`查询 @username` \- 查询用户信誉并发起评价\.
-`/top` 或 `/红榜` \- 查看推荐排行榜\.
-`/bottom` 或 `/黑榜` \- 查看拉黑排行榜\.
-`/myfavorites` \- 查看你的个人收藏夹（私聊发送）\.
-`/myprofile` \- 查看你自己的声望和收到的标签\.
-`/help` \- 显示此帮助信息\.
+`查询 @username` - 查询用户信誉并发起评价.
+`/top` 或 `/红榜` - 查看推荐排行榜.
+`/bottom` 或 `/黑榜` - 查看拉黑排行榜.
+`/myfavorites` - 查看你的个人收藏夹（私聊发送）.
+`/myprofile` - 查看你自己的声望和收到的标签.
+`/help` - 显示此帮助信息.
     """
     admin_help = """
 *管理员命令:*
-`/setadmin <user_id>` \- 设置一个用户为管理员\.
-`/listtags` \- 列出所有可用的评价标签\.
-`/addtag <推荐|拉黑> <标签>` \- 添加一个新的评价标签\.
-`/removetag <标签>` \- 移除一个评价标签\.
+`/setadmin <user_id>` - 设置一个用户为管理员.
+`/listtags` - 列出所有可用的评价标签.
+`/addtag <推荐|拉黑> <标签>` - 添加一个新的评价标签.
+`/removetag <标签>` - 移除一个评价标签.
     """
     full_help_text = user_help
     if is_admin:
@@ -89,13 +90,37 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else: await query.answer("未知操作")
 
 async def post_init(application: Application):
-    """在应用启动后授予创世神权限。Webhook 的设置由 run_webhook 自动完成。"""
-    await grant_creator_admin_privileges()
+    """
+    在应用启动后设置 Webhook。
+    引入重试机制以解决Render平台启动初期的网络延迟问题。
+    """
+    max_retries = 5
+    retry_delay = 10  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"正在尝试第 {attempt + 1}/{max_retries} 次设置 Webhook: {WEBHOOK_URL}")
+            await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+            logger.info("✅ Webhook 设置成功！")
+            await grant_creator_admin_privileges()
+            return  # 成功后退出函数
+        except BadRequest as e:
+            if "invalid webhook URL specified" in str(e):
+                logger.warning(f"设置 Webhook 失败 (无效的URL)，将在 {retry_delay} 秒后重试...")
+                if attempt + 1 == max_retries:
+                    logger.critical("已达到最大重试次数，Webhook 设置失败。请检查 RENDER_EXTERNAL_URL。")
+                    raise
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"设置 Webhook 时发生意外的 BadRequest: {e}")
+                raise # 其他类型的 BadRequest，直接抛出
+        except Exception as e:
+            logger.error(f"设置 Webhook 时发生未知错误: {e}")
+            raise # 其他未知错误，直接抛出
 
 def main() -> None:
     logger.info("机器人正在启动 (Webhook 模式)...")
 
-    # --- 核心修复：增加对 RENDER_URL 的检查 ---
     if not RENDER_URL:
         logger.critical("错误: RENDER_EXTERNAL_URL 环境变量未设置。Webhook 模式无法启动。")
         return
@@ -109,7 +134,7 @@ def main() -> None:
 
     application = Application.builder().token(TOKEN).post_init(post_init).build()
     
-    # 处理器注册保持不变
+    # 处理器注册
     nomination_filter = (filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention')
     application.add_handler(MessageHandler(nomination_filter, handle_nomination))
     application.add_handler(CommandHandler("start", start))
@@ -128,12 +153,10 @@ def main() -> None:
     
     logger.info("所有处理器已注册。正在启动 Webhook 服务器...")
     
-    # --- 核心修复：让 run_webhook 自己构建和设置 URL ---
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=TOKEN,  # 将 Token 作为秘密路径
-        webhook_url=f"{RENDER_URL}/{TOKEN}" # 明确告诉框架完整的 URL
+        webhook_url=WEBHOOK_URL
     )
     
     logger.info("机器人已停止。")
