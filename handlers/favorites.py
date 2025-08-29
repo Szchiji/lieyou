@@ -8,7 +8,7 @@ from .reputation import handle_nomination
 logger = logging.getLogger(__name__)
 
 async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool = False):
-    """处理 /myfavorites 命令，以私信方式显示用户的个人收藏夹。"""
+    """处理 /myfavorites 命令或“返回”按钮，以私信方式显示用户的个人收藏夹。"""
     user = update.effective_user
     query = update.callback_query
     try:
@@ -28,12 +28,12 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
                 ])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-        if from_button or (query and query.message and query.message.chat.type == 'private'):
+        # 核心改造：如果来自按钮（移除或返回），就编辑原消息
+        if from_button or (query and (query.data == "back_to_favs" or query.data.startswith("fav_remove"))):
              await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
         else:
             await context.bot.send_message(chat_id=user.id, text=text, reply_markup=reply_markup, parse_mode='MarkdownV2')
             if update.message and update.message.chat.type != 'private':
-                # --- 核心修复：使用更兼容的 reply_to_message_id 参数来代替 quote=True ---
                 await update.message.reply_text(
                     "你的收藏夹已发送到你的私信中，请注意查收。",
                     reply_to_message_id=update.message.message_id
@@ -43,13 +43,12 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         if query:
             await query.answer("显示收藏夹失败，发生内部错误。", show_alert=True)
 
-# (handle_favorite_button 函数保持不变)
 async def handle_favorite_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """统一处理所有与收藏夹相关的按钮点击。"""
     query = update.callback_query
     data = query.data.split('_')
-    action_type = data[0] # fav, query
-    command = data[1] # add, remove, direct
+    action_type = data[0] 
+    command = data[1] 
 
     if action_type == 'fav':
         user_id_str, favorite_username = data[2], "_".join(data[3:])
@@ -72,4 +71,5 @@ async def handle_favorite_button(update: Update, context: ContextTypes.DEFAULT_T
             
     elif action_type == 'query' and command == 'direct':
         favorite_username = "_".join(data[2:])
-        await handle_nomination(update, context, direct_username=favorite_username)
+        # 核心改造：调用 handle_nomination 时，传递 from_favorites=True 标记
+        await handle_nomination(update, context, direct_username=favorite_username, from_favorites=True)
