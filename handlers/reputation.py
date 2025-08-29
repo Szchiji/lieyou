@@ -1,6 +1,7 @@
 import logging
 import hashlib
 import asyncio
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import ContextTypes
 from telegram.error import Forbidden, BadRequest
@@ -69,14 +70,22 @@ async def build_summary_view(nominee_username: str, summary: dict):
 async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     nominee_username = None
-    if context.matches:
-        match = context.matches[0]
+
+    match = re.search(r'@(\w{5,})|查询\s*@(\w{5,})', message.text)
+    if match:
         nominee_username = match.group(1) or match.group(2)
+
     if not nominee_username:
         return
+
     nominator_id = update.effective_user.id
     async with db_transaction() as conn:
-        await conn.execute("INSERT INTO users (id, username) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET username = $2", nominator_id, update.effective_user.username)
+        await conn.execute(
+            "INSERT INTO users (id, username) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET username = $2",
+            nominator_id,
+            update.effective_user.username
+        )
+
     summary = await get_reputation_summary(nominee_username, nominator_id)
     message_content = await build_summary_view(nominee_username, summary)
     await update.message.reply_text(**message_content)
