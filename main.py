@@ -50,3 +50,28 @@ async def main() -> None:
 
 if __name__ == "__main__":
     main()
+# ... (其他导入) ...
+from handlers.admin import set_rep
+
+# ... (main 函数) ...
+async def main() -> None:
+    # ... (初始化) ...
+    
+    application = Application.builder().token(token).build()
+    
+    # 注册命令处理器
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("hunt", hunt))
+    application.add_handler(CommandHandler("trap", trap))
+    application.add_handler(CommandHandler("list", list_prey))
+    application.add_handler(CommandHandler("profile", profile))
+    application.add_handler(CommandHandler("leaderboard", leaderboard))
+    # --- 【新增：注册管理员命令】 ---
+    application.add_handler(CommandHandler("setrep", set_rep))
+
+    # ... (注册回调处理器) ...
+    
+    # ... (启动机器人) ...
+
+# ... (文件末尾) ...
