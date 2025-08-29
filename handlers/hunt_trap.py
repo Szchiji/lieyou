@@ -79,3 +79,15 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def trap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_mark(update, context, TYPE_TRAP)
+# ... (其他导入) ...
+from handlers.decorators import restricted_to_group
+
+# ... (handle_mark 函数保持不变) ...
+
+@restricted_to_group
+async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_mark(update, context, TYPE_HUNT)
+
+@restricted_to_group
+async def trap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_mark(update, context, TYPE_TRAP)
