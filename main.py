@@ -4,13 +4,12 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from database import init_pool, create_tables
+from database import db_cursor, init_pool, create_tables
 from handlers.reputation import handle_mention_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
 from handlers.profile import my_favorites, my_profile
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
 
-# 加载环境变量和设置日志
 load_dotenv()
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,10 +18,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /start 命令，注册用户。"""
     user = update.effective_user
     await register_user_if_not_exists(user)
-    # 修正：使用更安全的 MarkdownV2
     await update.message.reply_text(
         f"你好，{user.first_name}！欢迎使用社群信誉机器人。\n"
         "在群里发送 `评价 @username` 即可开始。\n"
@@ -31,9 +28,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示帮助信息。"""
-    # 修正：使用更安全的 MarkdownV2，并转义特殊字符
-    help_text = """
+    """根据用户是否为管理员，显示不同的帮助信息。"""
+    user_id = update.effective_user.id
+    
+    with db_cursor() as cur:
+        cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
+        user_data = cur.fetchone()
+    
+    is_admin = user_data and user_data['is_admin']
+
+    user_help = """
 *用户命令:*
 `评价 @username` \- \(在群里发送\) 提名用户进行评价\.
 /top 或 /红榜 \- 查看推荐排行榜\.
@@ -41,22 +45,32 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /myfavorites \- 查看你的个人收藏夹（私聊发送）\.
 /myprofile \- 查看你自己的声望和收到的标签\.
 /help \- 显示此帮助信息\.
+    """
 
+    admin_help = """
 *管理员命令:*
 /setadmin `<user_id>` \- 设置一个用户为管理员\.
 /listtags \- 列出所有可用的评价标签\.
 /addtag `<推荐|拉黑> <标签>` \- 添加一个新的评价标签\.
 /removetag `<标签>` \- 移除一个评价标签\.
     """
-    await update.message.reply_text(help_text, parse_mode='MarkdownV2')
+    
+    full_help_text = user_help
+    if is_admin:
+        full_help_text += "\n" + admin_help
+
+    await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
 
 
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """总按钮分发器。"""
     query = update.callback_query
     action = query.data.split('_')[0]
 
-    if action in ["vote", "tag", "fav"]:
+    # 修复：确保 fav 按钮被正确分发
+    if action == "fav":
+        from handlers.profile import handle_favorite_button
+        await handle_favorite_button(query, context)
+    elif action in ["vote", "tag"]:
         await reputation_button_handler(update, context)
     elif action == "leaderboard":
         await leaderboard_button_handler(update, context)
@@ -65,7 +79,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 def main() -> None:
-    """启动机器人。"""
     logger.info("机器人正在启动...")
 
     try:
@@ -93,6 +106,7 @@ def main() -> None:
     application.add_handler(CommandHandler("myfavorites", my_favorites))
     application.add_handler(CommandHandler("myprofile", my_profile))
     
+    # 管理员命令处理器现在被 admin_required 装饰器保护
     application.add_handler(CommandHandler("setadmin", set_admin))
     application.add_handler(CommandHandler("listtags", list_tags))
     application.add_handler(CommandHandler("addtag", add_tag))
