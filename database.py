@@ -1,3 +1,5 @@
+import psycopg2
+import psycopg2.extras
 import psycopg2.pool
 from os import environ
 import logging
@@ -24,6 +26,7 @@ def get_db_cursor():
         raise Exception("数据库连接池未初始化。")
     conn = db_pool.getconn()
     conn.autocommit = True
+    # 使用 psycopg2.extras.DictCursor 让查询结果可以像字典一样访问
     return conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
 def release_db_connection(conn):
@@ -51,11 +54,11 @@ def create_tables():
             id BIGINT PRIMARY KEY,
             username VARCHAR(255),
             first_name VARCHAR(255),
-            reputation INT DEFAULT 0,
             is_admin BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         """,
+        # 移除了 users 表中的 reputation 字段，因为它应该在 targets 表中
         """
         CREATE TABLE IF NOT EXISTS targets (
             id BIGINT PRIMARY KEY,
@@ -114,13 +117,13 @@ def create_tables():
                 cur.execute(command)
             
             # 为系统添加一些默认标签
-            default_tags = [
-                ('交易爽快', 1), ('技术大佬', 1), ('乐于助人', 1), ('信誉商家', 1),
-                ('交易拖延', -1), ('骗子', -1), ('发布广告', -1), ('态度恶劣', -1)
-            ]
             cur.execute("SELECT COUNT(*) FROM tags;")
             if cur.fetchone()[0] == 0:
                 logger.info("数据库中没有标签，正在插入默认标签...")
+                default_tags = [
+                    ('交易爽快', 1), ('技术大佬', 1), ('乐于助人', 1), ('信誉商家', 1),
+                    ('交易拖延', -1), ('骗子', -1), ('发布广告', -1), ('态度恶劣', -1)
+                ]
                 for text, type in default_tags:
                     cur.execute("INSERT INTO tags (tag_text, tag_type) VALUES (%s, %s) ON CONFLICT (tag_text) DO NOTHING;", (text, type))
                 logger.info("默认标签已插入。")
