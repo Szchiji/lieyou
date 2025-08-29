@@ -2,6 +2,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db_transaction
+from handlers.leaderboard import clear_leaderboard_cache
 from os import environ
 from html import escape
 
@@ -28,11 +29,28 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🛡️ 守护者圣殿", callback_data="admin_panel_permissions")],
         [InlineKeyboardButton("🔥 箴言熔炉", callback_data="admin_panel_tags")],
+        [InlineKeyboardButton("🏺 存在抹除室", callback_data="admin_leaderboard_panel")],
         [InlineKeyboardButton("⚙️ 法则律典", callback_data="admin_panel_system")],
         [InlineKeyboardButton("🌍 返回凡界", callback_data="back_to_help")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = ("🏺 **存在抹除室** 🏺\n\n"
+            "此权柄可将一个存在从“英灵殿”与“放逐深渊”中彻底抹除，其所有赞誉与警示都将归于虚无。\n\n"
+            "此操作不可逆转，请谨慎使用。")
+    keyboard = [
+        [InlineKeyboardButton("✍️ 指定要抹除的存在", callback_data="admin_leaderboard_remove_prompt")],
+        [InlineKeyboardButton("⬅️ 返回枢纽", callback_data="admin_settings_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def remove_from_leaderboard_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['next_action'] = 'remove_from_leaderboard'
+    text = "✍️ **指定存在**\n\n请发送您想从时代群像中抹除的存在的完整 `@用户名`。\n(例如: @some_user)\n\n发送 /cancel 可取消。"
+    await update.callback_query.edit_message_text(text, parse_mode='Markdown')
 
 async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🔥 **箴言熔炉 (The Forge)** 🔥\n\n“在此，你锻造构成神谕的箴言”"
@@ -201,6 +219,15 @@ async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             async with db_transaction() as conn:
                 await conn.execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", setting_key, new_value)
             feedback_message = f"✅ 法则 **{setting_key}** 已更新为 `{new_value}`！"
+        elif next_action == 'remove_from_leaderboard':
+            username_to_remove = message_text.lstrip('@')
+            async with db_transaction() as conn:
+                result = await conn.execute("UPDATE reputation_profiles SET recommend_count = 0, block_count = 0 WHERE username = $1", username_to_remove)
+            if result.endswith('0'):
+                feedback_message = f"❌ 未在神谕之卷中找到存在 `@{username_to_remove}`。"
+            else:
+                clear_leaderboard_cache()
+                feedback_message = f"✅ 存在 `@{username_to_remove}` 的所有时代印记已被抹除。"
         if feedback_message:
             await update.message.reply_text(feedback_message, parse_mode='Markdown')
     except ValueError:
