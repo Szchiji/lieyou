@@ -1,43 +1,37 @@
 import psycopg2
 import psycopg2.extras
-from psycopg2 import pool  # <--- 改动1：用最直接、最强壮的方式导入“连接池”模块
+from psycopg2 import pool
 from contextlib import contextmanager
 from os import environ
 import logging
 
 logger = logging.getLogger(__name__)
-# 改动2：将全局变量重命名，以避免和导入的模块名冲突
 db_pool = None
 
 def init_pool():
     """初始化数据库连接池。"""
-    global db_pool  # <--- 改动3：使用新的变量名
+    global db_pool
     try:
-        # Use the directly imported 'pool' module
+        # --- 核心改动：直接使用 Render 提供的 DATABASE_URL ---
+        database_url = environ.get("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL 环境变量未设置。机器人无法连接到数据库。")
+
         db_pool = pool.SimpleConnectionPool(
             1, 20,
-            user=environ.get("DB_USER"),
-            password=environ.get("DB_PASSWORD"),
-            host=environ.get("DB_HOST"),
-            port=environ.get("DB_PORT"),
-            database=environ.get("DB_NAME")
+            dsn=database_url  # 使用 DATABASE_URL 作为唯一的数据源名称
         )
         logger.info("数据库连接池初始化成功。")
-    except psycopg2.OperationalError as e:
+    except Exception as e:
         logger.critical(f"数据库连接失败: {e}")
         raise
-    except AttributeError as e:
-        # 这个捕获是为了万一还出同样的错，能提供更详细的信息
-        logger.critical(f"初始化连接池时发生属性错误，可能是psycopg2版本或环境问题: {e}")
-        raise
-
 
 @contextmanager
 def db_cursor():
     """提供一个数据库游标的上下文管理器。"""
-    if not db_pool: # <--- 改动4：使用新的变量名
+    if not db_pool:
         raise ConnectionError("数据库连接池未初始化。")
-    conn = db_pool.getconn() # <--- 改动5：使用新的变量名
+    conn = db_pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             yield cur
@@ -46,11 +40,11 @@ def db_cursor():
         conn.rollback()
         raise
     finally:
-        db_pool.putconn(conn) # <--- 改动6：使用新的变量名
+        db_pool.putconn(conn)
 
 def create_tables():
     """检查并创建所有需要的表。"""
-    # (此函数内容保持不变，是正确的)
+    # (此函数内容是正确的，保持不变)
     commands = [
         """
         CREATE TABLE IF NOT EXISTS users (
