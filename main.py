@@ -1,5 +1,4 @@
 import logging
-import asyncio
 import uvicorn
 from os import environ
 from dotenv import load_dotenv
@@ -31,7 +30,8 @@ async def grant_creator_admin_privileges(app: Application):
     try:
         creator_id = int(CREATOR_ID)
         chat = await app.bot.get_chat(creator_id)
-        creator_user = User(id=chat.id, first_name=chat.first_name, is_bot=False, username=chat.username)
+        # 核心修复：手动构建 User 对象以避免 is_bot 属性错误
+        creator_user = User(id=chat.id, first_name=chat.first_name or "Creator", is_bot=False, username=chat.username)
         await register_user_if_not_exists(creator_user)
         async with db_cursor() as cur:
             await cur.execute("UPDATE users SET is_admin = TRUE WHERE id = $1", creator_id)
@@ -46,10 +46,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await register_user_if_not_exists(update.effective_user)
     is_admin = False
-    async with db_cursor() as cur:
-        user_data = await cur.fetchrow("SELECT is_admin FROM users WHERE id = $1", update.effective_user.id)
-        if user_data: is_admin = user_data['is_admin']
-    
+    try:
+        async with db_cursor() as cur:
+            user_data = await cur.fetchrow("SELECT is_admin FROM users WHERE id = $1", update.effective_user.id)
+            if user_data: is_admin = user_data['is_admin']
+    except Exception as e:
+        logger.error(f"查询用户权限时出错: {e}")
+
     user_help = ("用户命令:\n查询 @username - 查询用户信誉并发起评价。\n/top 或 /红榜 - 查看推荐排行榜。\n"
                  "/bottom 或 /黑榜 - 查看拉黑排行榜。\n/myfavorites - 查看你的个人收藏夹（私聊发送）。\n"
                  "/myprofile - 查看你自己的声望和收到的标签。\n/help - 显示此帮助信息。")
@@ -92,17 +95,14 @@ async def lifespan(app: "FastAPI"):
     
     ptb_app = Application.builder().token(TOKEN).build()
     
-    # --- 注册处理器 (已纠正所有错误) ---
+    # --- 注册处理器 ---
     ptb_app.add_handler(MessageHandler((filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention'), handle_nomination))
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("help", help_command))
-    
-    # 纠正: 将中文命令使用 MessageHandler 分开处理
     ptb_app.add_handler(CommandHandler("top", get_top_board))
     ptb_app.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
     ptb_app.add_handler(CommandHandler("bottom", get_bottom_board))
     ptb_app.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
-    
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
     ptb_app.add_handler(CommandHandler("myprofile", my_profile))
     ptb_app.add_handler(CommandHandler("setadmin", set_admin))
@@ -127,7 +127,6 @@ def main():
     
     fastapi_app = FastAPI(lifespan=lifespan)
 
-    # 核心修复: 添加一个专门用于健康检查的端点
     @fastapi_app.get("/", include_in_schema=False)
     async def health_check():
         logger.info("❤️ 收到来自 Render 的健康检查请求，已回复 200 OK。")
