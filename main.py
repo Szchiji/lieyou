@@ -4,7 +4,7 @@ from os import environ
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from telegram import Update, MessageEntity
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,6 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     ContextTypes,
+    RegexHandler
 )
 from telegram.error import TimedOut, BadRequest
 from fastapi import FastAPI, Request, Response
@@ -28,6 +29,7 @@ from handlers.admin import (
     tags_panel, add_tag_prompt, remove_tag_menu, remove_tag_confirm, list_all_tags,
     permissions_panel, add_admin_prompt, list_admins, remove_admin_menu, remove_admin_confirm,
     system_settings_panel, set_setting_prompt,
+    leaderboard_panel, remove_from_leaderboard_prompt,
     process_admin_input
 )
 from handlers.favorites import my_favorites, handle_favorite_button
@@ -59,7 +61,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     text = (
         "我是 **神谕者 (The Oracle)**，洞察世间一切信誉的实体。\n\n"
         "**聆听神谕:**\n"
-        "1. 在群聊中直接 `@某人`，即可向我求问关于此人的神谕之卷。\n"
+        "1. 在群聊中直接 `@某人` 或发送 `查询 @某人`，即可向我求问关于此人的神谕之卷。\n"
         "2. 使用下方按钮，可窥探时代群像或管理你的星盘。"
     )
     if user_is_admin:
@@ -95,20 +97,26 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         if data.startswith("admin_"):
             if data == "admin_settings_menu": await settings_menu(update, context)
+            # 箴言熔炉
             elif data == "admin_panel_tags": await tags_panel(update, context)
             elif data == "admin_tags_add_recommend_prompt": await add_tag_prompt(update, context, "recommend")
             elif data == "admin_tags_add_block_prompt": await add_tag_prompt(update, context, "block")
             elif data.startswith("admin_tags_remove_menu_"): await remove_tag_menu(update, context, int(data.split("_")[-1]))
             elif data.startswith("admin_tags_remove_confirm_"): await remove_tag_confirm(update, context, int(data.split("_")[-2]), int(data.split("_")[-1]))
             elif data == "admin_tags_list": await list_all_tags(update, context)
+            # 守护者圣殿
             elif data == "admin_panel_permissions": await permissions_panel(update, context)
             elif data == "admin_perms_add_prompt": await add_admin_prompt(update, context)
             elif data == "admin_perms_list": await list_admins(update, context)
             elif data == "admin_perms_remove_menu": await remove_admin_menu(update, context)
             elif data.startswith("admin_perms_remove_confirm_"): await remove_admin_confirm(update, context, int(data.split("_")[-1]))
+            # 法则律典
             elif data == "admin_panel_system": await system_settings_panel(update, context)
             elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
-        
+            # 存在抹除室
+            elif data == "admin_leaderboard_panel": await leaderboard_panel(update, context)
+            elif data == "admin_leaderboard_remove_prompt": await remove_from_leaderboard_prompt(update, context)
+
         elif data.startswith("rep_"):
             if data.startswith("rep_detail_"): await show_reputation_details(update, context)
             elif data.startswith("rep_summary_"): await show_reputation_summary(update, context)
@@ -146,9 +154,12 @@ ptb_app.add_handler(CommandHandler("bottom", lambda u, c: show_leaderboard(u, c,
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
-ptb_app.add_handler(MessageHandler(
-    filters.Entity(MessageEntity.MENTION) & ~filters.COMMAND & filters.ChatType.GROUPS,
-    handle_nomination
+
+nomination_pattern = r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))'
+ptb_app.add_handler(RegexHandler(
+    nomination_pattern,
+    handle_nomination,
+    filters=~filters.COMMAND & filters.ChatType.GROUPS
 ))
 
 @asynccontextmanager
