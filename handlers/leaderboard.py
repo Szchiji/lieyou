@@ -77,3 +77,4 @@ def build_pagination_keyboard(board_type, current_page, total_pages):
         buttons.append(row)
         
     return InlineKeyboardMarkup(buttons)
+ 
