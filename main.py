@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from os import environ
 from dotenv import load_dotenv
 
@@ -11,24 +12,24 @@ from handlers.hunt_trap import hunt, trap
 from handlers.list import list_prey
 from handlers.profile import profile
 from handlers.leaderboard import leaderboard
+from handlers.admin import set_rep
 from constants import CALLBACK_LIST_PREFIX
 
-# 日志配置
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """启动并运行机器人。"""
     load_dotenv()
     
-    # 初始化数据库连接池并创建表
     init_pool()
     create_tables()
 
-    # 创建 Application 实例
     token = environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN 环境变量未设置！")
+        logger.error("TELEGRAM_BOT_TOKEN 环境变量未设置！")
+        return
     
     application = Application.builder().token(token).build()
     
@@ -40,38 +41,13 @@ async def main() -> None:
     application.add_handler(CommandHandler("list", list_prey))
     application.add_handler(CommandHandler("profile", profile))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
+    application.add_handler(CommandHandler("setrep", set_rep))
 
     # 注册回调处理器
     application.add_handler(CallbackQueryHandler(list_prey, pattern=f"^{CALLBACK_LIST_PREFIX}"))
 
-    # 启动机器人
-    logging.info("Bot is starting up...")
+    logger.info("Bot is starting up...")
     await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
-# ... (其他导入) ...
-from handlers.admin import set_rep
-
-# ... (main 函数) ...
-async def main() -> None:
-    # ... (初始化) ...
-    
-    application = Application.builder().token(token).build()
-    
-    # 注册命令处理器
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("hunt", hunt))
-    application.add_handler(CommandHandler("trap", trap))
-    application.add_handler(CommandHandler("list", list_prey))
-    application.add_handler(CommandHandler("profile", profile))
-    application.add_handler(CommandHandler("leaderboard", leaderboard))
-    # --- 【新增：注册管理员命令】 ---
-    application.add_handler(CommandHandler("setrep", set_rep))
-
-    # ... (注册回调处理器) ...
-    
-    # ... (启动机器人) ...
-
-# ... (文件末尾) ...
+    asyncio.run(main())
