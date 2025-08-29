@@ -1,5 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, MessageEntity
 from telegram.ext import ContextTypes
+from telegram.helpers import escape_markdown
 from database import db_cursor
 import logging
 
@@ -20,26 +21,22 @@ async def register_user_if_not_exists(user: User):
             (user.id, user.username, user.first_name)
         )
 
-# --- 新的、唯一的提名处理器 ---
 async def handle_mention_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 '评价 @username' 格式的提名。"""
     message = update.effective_message
     reporter = update.effective_user
     
-    # 确保提名者已注册
     await register_user_if_not_exists(reporter)
 
     target_username = None
-    # 遍历消息中的所有实体，寻找第一个 @mention
     for entity in message.entities:
         if entity.type == MessageEntity.MENTION:
             target_username = message.text[entity.offset + 1 : entity.offset + entity.length]
-            break # 只处理第一个 @
+            break
 
     if not target_username:
-        # 如果消息以 "评价" 开头但没有@，可以给个提示
-        if message.text.lower().startswith('评价') or message.text.lower().startswith('nominate'):
-             await message.reply_text("请提供一个 @username。用法: `评价 @username`", parse_mode='Markdown')
+        if message.text.lower().startswith(('评价', 'nominate')):
+             await message.reply_text("请提供一个 @username。用法: `评价 @username`", parse_mode='MarkdownV2')
         return
 
     with db_cursor() as cur:
@@ -59,10 +56,12 @@ async def handle_mention_nomination(update: Update, context: ContextTypes.DEFAUL
             target_first_name=target_user_data['first_name']
         )
     else:
+        # 修正：对用户输入的内容进行转义
+        safe_username = escape_markdown(target_username, version=2)
         await message.reply_text(
-            f"❌ 我还不认识 **@{target_username}**。\n\n"
-            f"请先让 **@{target_username}** 与我私聊一次，我才能认识他/她。",
-            parse_mode='Markdown'
+            f"❌ 我还不认识 *@{safe_username}*。\n\n"
+            f"请先让 *@_@{safe_username}* 与我私聊一次，我才能认识他/她。",
+            parse_mode='MarkdownV2'
         )
 
 async def _proceed_with_nomination(message, reporter, target_id, target_username, target_first_name):
@@ -81,15 +80,19 @@ async def _proceed_with_nomination(message, reporter, target_id, target_username
 
         keyboard = await build_vote_keyboard(target_id)
         
+        # 修正：对所有用户输入的内容进行转义
+        safe_first_name = escape_markdown(target_first_name, version=2)
+        safe_username = escape_markdown(target_username, version=2)
+
         await message.reply_text(
-            f"👤 **目标已锁定: {target_first_name} (@{target_username})**\n"
-            f"当前状态: [推荐: {target_data['upvotes']}] [拉黑: {target_data['downvotes']}]\n\n"
+            f"👤 *目标已锁定: {safe_first_name} \(@{safe_username}\)*\n"
+            f"当前状态: \[推荐: {target_data['upvotes']}\] \[拉黑: {target_data['downvotes']}\]\n\n"
             "请社群成员进行评价：",
             reply_markup=keyboard,
-            parse_mode='Markdown'
+            parse_mode='MarkdownV2'
         )
 
-# --- 投票和按钮逻辑 (保持不变, 但需要确保 handle_skip_tag 和 button_handler 完整) ---
+# --- 投票和按钮逻辑 (大部分不变) ---
 
 async def build_vote_keyboard(target_id: int):
     keyboard = [
@@ -109,6 +112,7 @@ async def handle_vote(query, voter, target_id, vote_type):
         return
 
     with db_cursor() as cur:
+        # ... (内部逻辑不变) ...
         cur.execute("SELECT vote_type FROM votes WHERE voter_id = %s AND target_id = %s", (voter.id, target_id))
         existing_vote = cur.fetchone()
 
@@ -124,8 +128,9 @@ async def handle_vote(query, voter, target_id, vote_type):
         if existing_vote:
             cur.execute("UPDATE targets SET upvotes = upvotes + %s, downvotes = downvotes + %s WHERE id = %s", (1 if vote_type == 1 else -1, -1 if vote_type == 1 else 1, target_id))
         else:
-            cur.execute(f"UPDATE targets SET {'upvotes' if vote_type == 1 else 'downvotes'} = {'upvotes' if vote_type == 1 else 'downvotes'} + 1 WHERE id = %s", (target_id,))
-
+            column_to_update = 'upvotes' if vote_type == 1 else 'downvotes'
+            cur.execute(f"UPDATE targets SET {column_to_update} = {column_to_update} + 1 WHERE id = %s", (target_id,))
+        
         cur.execute("SELECT id, tag_text FROM tags WHERE tag_type = %s", (vote_type,))
         tags = cur.fetchall()
         
@@ -139,17 +144,23 @@ async def handle_skip_tag(query, target_id):
     with db_cursor() as cur:
         cur.execute("SELECT * FROM targets WHERE id = %s", (target_id,))
         target_data = cur.fetchone()
-        cur.execute("SELECT first_name FROM users WHERE id = %s", (target_id,))
+        cur.execute("SELECT first_name, username FROM users WHERE id = %s", (target_id,))
         target_user = cur.fetchone()
 
         keyboard = await build_vote_keyboard(target_id)
+        
+        # 修正：转义
+        safe_first_name = escape_markdown(target_user['first_name'], version=2)
+        safe_username = escape_markdown(target_user['username'], version=2)
+
         await query.edit_message_text(
-            f"✅ 感谢您的评价！\n\n👤 **目标: {target_user['first_name']} (@{target_data['username']})**\n当前状态: [推荐: {target_data['upvotes']}] [拉黑: {target_data['downvotes']}]",
-            reply_markup=keyboard, parse_mode='Markdown'
+            f"✅ 感谢您的评价！\n\n👤 *目标: {safe_first_name} \(@{safe_username}\)*\n当前状态: \[推荐: {target_data['upvotes']}\] \[拉黑: {target_data['downvotes']}\]",
+            reply_markup=keyboard, parse_mode='MarkdownV2'
         )
 
 async def handle_apply_tag(query, voter, target_id, tag_id, vote_type):
     with db_cursor() as cur:
+        # ... (内部逻辑不变) ...
         cur.execute("SELECT * from votes WHERE voter_id = %s AND target_id = %s", (voter.id, target_id))
         if not cur.fetchone():
             await query.answer("请先投票！", show_alert=True)
