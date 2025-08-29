@@ -7,23 +7,15 @@ from os import environ
 logger = logging.getLogger(__name__)
 CREATOR_ID = environ.get("CREATOR_ID")
 
-# --- “神权进化”：终极咒语，必须保留 ---
 async def god_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The ultimate command to grant admin privileges to the creator."""
     user_id = update.effective_user.id
     creator_id_str = environ.get("CREATOR_ID")
-    
     if not creator_id_str or user_id != int(creator_id_str):
         await update.message.reply_text("...")
         return
-        
     async with db_transaction() as conn:
         await conn.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", user_id)
-    
     await update.message.reply_text("👑 终极神权已激活。")
-
-
-# --- 以下为我们之前构建的所有可视化功能，保持不变 ---
 
 async def is_admin(user_id: int) -> bool:
     async with db_transaction() as conn:
@@ -41,16 +33,100 @@ async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
+# --- 标签管理面板 (升级) ---
 async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🏷️ **标签管理** 🏷️\n\n在这里，您可以创造、查看和删除用于评价的标签。"
     keyboard = [
         [InlineKeyboardButton("➕ 新增推荐标签", callback_data="admin_tags_add_recommend_prompt")],
         [InlineKeyboardButton("➕ 新增拉黑标签", callback_data="admin_tags_add_block_prompt")],
         [InlineKeyboardButton("🗑️ 移除标签", callback_data="admin_tags_remove_menu_1")],
+        [InlineKeyboardButton("📜 查看所有标签", callback_data="admin_tags_list")], # <-- 新增按钮
         [InlineKeyboardButton("⬅️ 返回神面板", callback_data="admin_settings_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# --- 新增功能：查看所有标签 ---
+async def list_all_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async with db_transaction() as conn:
+        tags = await conn.fetch("SELECT tag_name, type FROM tags ORDER BY type, tag_name")
+    
+    if not tags:
+        text = "当前没有任何已设置的标签。"
+    else:
+        recommend_tags = [f"- {t['tag_name']}" for t in tags if t['type'] == 'recommend']
+        block_tags = [f"- {t['tag_name']}" for t in tags if t['type'] == 'block']
+        
+        text_parts = ["📜 **所有已设置的标签** 📜\n"]
+        if recommend_tags:
+            text_parts.append("\n**👍 推荐类:**")
+            text_parts.extend(recommend_tags)
+        if block_tags:
+            text_parts.append("\n**👎 拉黑类:**")
+            text_parts.extend(block_tags)
+        text = "\n".join(text_parts)
+
+    keyboard = [[InlineKeyboardButton("⬅️ 返回标签管理", callback_data="admin_panel_tags")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# --- 升级的输入处理器，带即时反馈 ---
+async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not await is_admin(user_id): return
+    next_action = context.user_data.get('next_action')
+    if not next_action: return
+    del context.user_data['next_action']
+    message_text = update.message.text.strip()
+    if message_text == '/cancel':
+        await update.message.reply_text("操作已取消。")
+        return
+
+    feedback_message = "" # 用于存储反馈信息
+    try:
+        if next_action.startswith('add_tag_'):
+            tag_type = next_action.split('_')[-1]
+            tag_name = message_text
+            async with db_transaction() as conn:
+                await conn.execute("INSERT INTO tags (tag_name, type) VALUES ($1, $2)", tag_name, tag_type)
+            type_text = "推荐" if tag_type == "recommend" else "拉黑"
+            feedback_message = f"✅ 新增 **{type_text}** 标签「{tag_name}」成功！"
+
+        elif next_action == 'add_admin':
+            new_admin_id = int(message_text)
+            async with db_transaction() as conn:
+                await conn.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", new_admin_id)
+            feedback_message = f"✅ 已成功授予用户 `{new_admin_id}` 神权！"
+
+        elif next_action.startswith('set_setting_'):
+            setting_key = next_action[len('set_setting_'):]
+            new_value = message_text
+            if not new_value.isdigit():
+                await update.message.reply_text("❌ 输入无效，必须是纯数字。请重新操作。")
+                return
+            async with db_transaction() as conn:
+                await conn.execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", setting_key, new_value)
+            feedback_message = f"✅ 系统法则 **{setting_key}** 已更新为 `{new_value}`！"
+
+        # 发送统一的反馈消息
+        if feedback_message:
+            await update.message.reply_text(feedback_message, parse_mode='Markdown')
+
+    except ValueError:
+        await update.message.reply_text("❌ 输入格式错误，请输入有效的数字ID。")
+    except Exception as e:
+        logger.error(f"处理管理员输入 {next_action} 时失败: {e}")
+        if "unique constraint" in str(e).lower():
+            await update.message.reply_text("❌ 操作失败：该项目已存在。")
+        else:
+            await update.message.reply_text(f"❌ 操作失败，发生未知错误。")
+
+# (其他 admin 函数保持不变)
+async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_type: str):
+    context.user_data['next_action'] = f'add_tag_{tag_type}'
+    type_text = "推荐" if tag_type == "recommend" else "拉黑"
+    text = f"您正在新增 **{type_text}** 标签。\n\n请直接在聊天框中发送您想添加的标签名称。\n\n发送 /cancel 可以取消操作。"
+    await update.callback_query.edit_message_text(text, parse_mode='Markdown')
 
 async def permissions_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛂 **权限管理** 🛂\n\n在这里，您可以授予或收回其他用户的管理员神权。"
@@ -71,57 +147,38 @@ async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_transaction() as conn:
         admins = await conn.fetch("SELECT id FROM users WHERE is_admin = TRUE")
-    
     creator_id_int = int(CREATOR_ID) if CREATOR_ID else None
-    admin_list = []
-    for admin in admins:
-        admin_id = admin['id']
-        note = " (创世神)" if creator_id_int and admin_id == creator_id_int else ""
-        admin_list.append(f"- `{admin_id}`{note}")
+    admin_list = [f"- `{admin['id']}`{' (创世神)' if creator_id_int and admin['id'] == creator_id_int else ''}" for admin in admins]
     text = "📜 **神使列表** 📜\n\n" + "\n".join(admin_list)
-        
     keyboard = [[InlineKeyboardButton("⬅️ 返回权限管理", callback_data="admin_panel_permissions")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def remove_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    current_user_id = update.effective_user.id
-    creator_id_int = int(CREATOR_ID) if CREATOR_ID else None
-    
+    current_user_id, creator_id_int = update.effective_user.id, int(CREATOR_ID) if CREATOR_ID else None
     async with db_transaction() as conn:
         admins = await conn.fetch("SELECT id FROM users WHERE is_admin = TRUE AND id != $1 AND id != $2", creator_id_int, current_user_id)
-
     if not admins:
-        text = "当前没有可供移除的神使。"
-        keyboard = [[InlineKeyboardButton("⬅️ 返回权限管理", callback_data="admin_panel_permissions")]]
+        text, keyboard = "当前没有可供移除的神使。", [[InlineKeyboardButton("⬅️ 返回权限管理", callback_data="admin_panel_permissions")]]
     else:
         text = "🗑️ **收回神权** 🗑️\n\n请选择您想收回其权限的神使。"
-        keyboard = []
-        for admin in admins:
-            admin_id = admin['id']
-            keyboard.append([InlineKeyboardButton(f"神使: {admin_id}", callback_data=f"admin_perms_remove_confirm_{admin_id}")])
+        keyboard = [[InlineKeyboardButton(f"神使: {admin['id']}", callback_data=f"admin_perms_remove_confirm_{admin['id']}")] for admin in admins]
         keyboard.append([InlineKeyboardButton("⬅️ 返回权限管理", callback_data="admin_panel_permissions")])
-        
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def remove_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id_to_remove: int):
     async with db_transaction() as conn:
         await conn.execute("UPDATE users SET is_admin = FALSE WHERE id = $1", user_id_to_remove)
-    
     await update.callback_query.answer(f"✅ 已成功收回用户 {user_id_to_remove} 的神权！", show_alert=True)
     await remove_admin_menu(update, context)
 
 async def system_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with db_transaction() as conn:
         ttl_row = await conn.fetchrow("SELECT value FROM settings WHERE key = 'leaderboard_cache_ttl'")
-    
     ttl = int(ttl_row['value']) if ttl_row else 300
-    
     text = (f"⚙️ **系统设置** ⚙️\n\n在这里，您可以调整世界的物理法则。\n\n"
             f"▶️ **当前法则:**\n"
             f"- 排行榜缓存时间: `{ttl}` 秒\n")
-
     keyboard = [
         [InlineKeyboardButton("⚙️ 更改缓存时间", callback_data="admin_system_set_prompt_leaderboard_cache_ttl")],
         [InlineKeyboardButton("⬅️ 返回神面板", callback_data="admin_settings_menu")]
@@ -135,52 +192,6 @@ async def set_setting_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
     text = prompts.get(setting_key, "未知的设置项。") + "\n\n发送 /cancel 可以取消操作。"
     await update.callback_query.edit_message_text(text, parse_mode='Markdown')
 
-async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not await is_admin(user_id): return
-    next_action = context.user_data.get('next_action')
-    if not next_action: return
-    del context.user_data['next_action']
-    message_text = update.message.text.strip()
-    if message_text == '/cancel':
-        await update.message.reply_text("操作已取消。")
-        return
-    try:
-        if next_action.startswith('add_tag_'):
-            tag_type = next_action.split('_')[-1]
-            tag_name = message_text
-            async with db_transaction() as conn:
-                await conn.execute("INSERT INTO tags (tag_name, type) VALUES ($1, $2)", tag_name, tag_type)
-            await update.message.reply_text(f"✅ 新增 **{tag_type}** 标签「{tag_name}」成功！", parse_mode='Markdown')
-        elif next_action == 'add_admin':
-            new_admin_id = int(message_text)
-            async with db_transaction() as conn:
-                await conn.execute("INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE", new_admin_id)
-            await update.message.reply_text(f"✅ 已成功授予用户 `{new_admin_id}` 神权！", parse_mode='Markdown')
-        elif next_action.startswith('set_setting_'):
-            setting_key = next_action[len('set_setting_'):]
-            new_value = message_text
-            if not new_value.isdigit():
-                await update.message.reply_text("❌ 输入无效，必须是纯数字。请重新操作。")
-                return
-            async with db_transaction() as conn:
-                await conn.execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2", setting_key, new_value)
-            await update.message.reply_text(f"✅ 系统法则 **{setting_key}** 已更新为 `{new_value}`！", parse_mode='Markdown')
-    except ValueError:
-        await update.message.reply_text("❌ 输入格式错误，请输入有效的数字ID。")
-    except Exception as e:
-        logger.error(f"处理管理员输入 {next_action} 时失败: {e}")
-        if "unique constraint" in str(e).lower():
-            await update.message.reply_text("❌ 操作失败：该项目已存在。")
-        else:
-            await update.message.reply_text(f"❌ 操作失败，发生未知错误。")
-
-async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_type: str):
-    context.user_data['next_action'] = f'add_tag_{tag_type}'
-    type_text = "推荐" if tag_type == "recommend" else "拉黑"
-    text = f"您正在新增 **{type_text}** 标签。\n\n请直接在聊天框中发送您想添加的标签名称。\n\n发送 /cancel 可以取消操作。"
-    await update.callback_query.edit_message_text(text, parse_mode='Markdown')
-
 async def remove_tag_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
     async with db_transaction() as conn:
         tags = await conn.fetch("SELECT id, tag_name, type FROM tags ORDER BY type, tag_name")
@@ -188,22 +199,16 @@ async def remove_tag_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         await update.callback_query.answer("当前没有任何标签可供移除。", show_alert=True)
         return
     text = "🗑️ **移除标签** 🗑️\n\n请选择您想移除的标签。点击按钮即可删除。"
-    keyboard = []
-    page_size = 5
+    keyboard, page_size = [], 5
     start, end = (page - 1) * page_size, page * page_size
-    tags_on_page = tags[start:end]
-    for tag in tags_on_page:
-        icon = "👍" if tag['type'] == 'recommend' else "👎"
-        button_text = f"{icon} {tag['tag_name']}"
-        callback_data = f"admin_tags_remove_confirm_{tag['id']}_{page}"
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+    for tag in tags[start:end]:
+        keyboard.append([InlineKeyboardButton(f"{'👍' if tag['type'] == 'recommend' else '👎'} {tag['tag_name']}", callback_data=f"admin_tags_remove_confirm_{tag['id']}_{page}")])
     page_row = []
     if page > 1: page_row.append(InlineKeyboardButton("⬅️ 上页", callback_data=f"admin_tags_remove_menu_{page-1}"))
     if end < len(tags): page_row.append(InlineKeyboardButton("下页 ➡️", callback_data=f"admin_tags_remove_menu_{page+1}"))
     if page_row: keyboard.append(page_row)
     keyboard.append([InlineKeyboardButton("⬅️ 返回标签管理", callback_data="admin_panel_tags")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def remove_tag_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_id: int, page: int):
     async with db_transaction() as conn:
