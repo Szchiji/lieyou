@@ -57,7 +57,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     is_admin_user = False
     try:
         async with db_cursor() as cur:
-            # 确保用户存在于数据库中，以便查询权限
             await cur.execute("INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING", update.effective_user.id)
             user_data = await cur.fetchrow("SELECT is_admin FROM users WHERE id = $1", update.effective_user.id)
             if user_data:
@@ -77,6 +76,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
             "`/removetag <标签>`"
         )
 
+    # --- 核心改造：移除按钮上多余的命令文本，追求极致的优雅 ---
     keyboard = [
         [InlineKeyboardButton("🏆 推荐榜", callback_data="show_leaderboard_top_1")],
         [InlineKeyboardButton("☠️ 拉黑榜", callback_data="show_leaderboard_bottom_1")],
@@ -85,7 +85,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # 判断是编辑消息还是发送新消息
     if from_button or (update.callback_query and update.callback_query.data == 'back_to_help'):
         await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
@@ -109,7 +108,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if data[1] == "leaderboard":
                 await show_leaderboard(update, context, board_type=data[2], page=int(data[3]))
             elif data[1] == "my":
-                # 对于收藏夹，我们直接调用函数，它会在私聊中响应
                 await my_favorites(update, context)
         elif action == "leaderboard":
             if data[1] == "noop": return
@@ -135,20 +133,16 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # --- PTB 应用设置 ---
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 
-# 注册所有处理器
 ptb_app.add_handler(MessageHandler(filters.Regex("^查询"), handle_nomination))
 ptb_app.add_handler(CommandHandler("start", start_command))
 ptb_app.add_handler(CommandHandler("help", help_command))
-# 保留旧的文本命令作为快捷方式
 ptb_app.add_handler(CommandHandler("top", lambda u, c: show_leaderboard(u, c, 'top', 1)))
 ptb_app.add_handler(CommandHandler("bottom", lambda u, c: show_leaderboard(u, c, 'bottom', 1)))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
-# 管理员命令
 ptb_app.add_handler(CommandHandler("setadmin", set_admin))
 ptb_app.add_handler(CommandHandler("listtags", list_tags))
 ptb_app.add_handler(CommandHandler("addtag", add_tag))
 ptb_app.add_handler(CommandHandler("removetag", remove_tag))
-# 统一按钮处理器
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 
 # --- FastAPI 与 PTB 集成 ---
