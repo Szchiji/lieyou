@@ -8,10 +8,10 @@ from contextlib import asynccontextmanager
 from telegram import Update, User
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-from database import db_cursor, init_pool, create_tables
+from database import init_pool, create_tables, db_cursor
 from handlers.reputation import handle_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
-from handlers.profile import my_favorites, my_profile
+from handlers.profile import my_favorites, my_profile, handle_favorite_button
 from handlers.admin import set_admin, list_tags, add_tag, remove_tag
 
 # --- 日志和环境变量设置 ---
@@ -82,13 +82,23 @@ async def post_init(application: Application):
 
 @asynccontextmanager
 async def lifespan(app: "FastAPI"):
-    logger.info("FastAPI 应用启动，初始化 PTB...")
+    logger.info("FastAPI 应用启动，正在初始化数据库和 PTB...")
+    await init_pool()
+    await create_tables()
+    
     ptb_app = Application.builder().token(TOKEN).build()
-    # 注册处理器
+    
+    # --- 注册处理器 (已纠正所有错误) ---
     ptb_app.add_handler(MessageHandler((filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention'), handle_nomination))
-    ptb_app.add_handler(CommandHandler(["start", "help"], start)) # 简化
-    ptb_app.add_handler(CommandHandler(["top", "红榜"], get_top_board))
-    ptb_app.add_handler(CommandHandler(["bottom", "黑榜"], get_bottom_board))
+    ptb_app.add_handler(CommandHandler("start", start))
+    ptb_app.add_handler(CommandHandler("help", help_command))
+    
+    # 纠正: 将中文命令使用 MessageHandler 分开处理
+    ptb_app.add_handler(CommandHandler("top", get_top_board))
+    ptb_app.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
+    ptb_app.add_handler(CommandHandler("bottom", get_bottom_board))
+    ptb_app.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
+    
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
     ptb_app.add_handler(CommandHandler("myprofile", my_profile))
     ptb_app.add_handler(CommandHandler("setadmin", set_admin))
@@ -135,9 +145,4 @@ if __name__ == "__main__":
     if not all([TOKEN, RENDER_URL]):
         logger.critical("错误: 环境变量 TELEGRAM_BOT_TOKEN 或 RENDER_EXTERNAL_URL 未设置。")
     else:
-        # 在启动前，先初始化一次数据库，确保表结构正确
-        async def setup():
-            await init_pool()
-            await create_tables()
-        asyncio.run(setup())
         main()
