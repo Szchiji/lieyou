@@ -28,8 +28,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """根据用户是否为管理员，显示不同的帮助信息。"""
     user_id = update.effective_user.id
+    await register_user_if_not_exists(update.effective_user) # 确保用户存在
     
     with db_cursor() as cur:
         cur.execute("SELECT is_admin FROM users WHERE id = %s", (user_id,))
@@ -39,7 +39,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_help = """
 *用户命令:*
-`评价 @username` \- \(在群里发送\) 提名用户进行评价\.
+`评价 @username` \- 在群里发送以提名用户进行评价\.
 /top 或 /红榜 \- 查看推荐排行榜\.
 /bottom 或 /黑榜 \- 查看拉黑排行榜\.
 /myfavorites \- 查看你的个人收藏夹（私聊发送）\.
@@ -61,12 +61,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(full_help_text, parse_mode='MarkdownV2')
 
-
 async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     action = query.data.split('_')[0]
 
-    # 修复：确保 fav 按钮被正确分发
     if action == "fav":
         from handlers.profile import handle_favorite_button
         await handle_favorite_button(query, context)
@@ -76,7 +74,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await leaderboard_button_handler(update, context)
     else:
         await query.answer("未知操作")
-
 
 def main() -> None:
     logger.info("机器人正在启动...")
@@ -106,7 +103,6 @@ def main() -> None:
     application.add_handler(CommandHandler("myfavorites", my_favorites))
     application.add_handler(CommandHandler("myprofile", my_profile))
     
-    # 管理员命令处理器现在被 admin_required 装饰器保护
     application.add_handler(CommandHandler("setadmin", set_admin))
     application.add_handler(CommandHandler("listtags", list_tags))
     application.add_handler(CommandHandler("addtag", add_tag))
