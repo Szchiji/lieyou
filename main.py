@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from telegram import Update, User
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
-# 确保从正确的位置导入
 from database import init_pool, create_tables, db_cursor
 from handlers.reputation import handle_nomination, button_handler as reputation_button_handler, register_user_if_not_exists
 from handlers.leaderboard import get_top_board, get_bottom_board, leaderboard_button_handler
@@ -93,14 +92,17 @@ async def lifespan(app: "FastAPI"):
     
     ptb_app = Application.builder().token(TOKEN).build()
     
-    # --- 注册处理器 ---
+    # --- 注册处理器 (已纠正所有错误) ---
     ptb_app.add_handler(MessageHandler((filters.Regex('^查询') | filters.Regex('^query')) & filters.Entity('mention'), handle_nomination))
     ptb_app.add_handler(CommandHandler("start", start))
     ptb_app.add_handler(CommandHandler("help", help_command))
+    
+    # 纠正: 将中文命令使用 MessageHandler 分开处理
     ptb_app.add_handler(CommandHandler("top", get_top_board))
     ptb_app.add_handler(MessageHandler(filters.Regex('^/红榜$'), get_top_board))
     ptb_app.add_handler(CommandHandler("bottom", get_bottom_board))
     ptb_app.add_handler(MessageHandler(filters.Regex('^/黑榜$'), get_bottom_board))
+    
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
     ptb_app.add_handler(CommandHandler("myprofile", my_profile))
     ptb_app.add_handler(CommandHandler("setadmin", set_admin))
@@ -128,10 +130,6 @@ def main():
     # 核心修复: 添加一个专门用于健康检查的端点
     @fastapi_app.get("/", include_in_schema=False)
     async def health_check():
-        """
-        这个端点专门用于响应Render平台的健康检查。
-        它会返回一个 HTTP 200 OK 状态码，告诉Render“我还活着”。
-        """
         logger.info("❤️ 收到来自 Render 的健康检查请求，已回复 200 OK。")
         return {"status": "OK, I am alive and well!"}
 
