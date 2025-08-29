@@ -1,128 +1,90 @@
-import psycopg2
-import psycopg2.extras
-from psycopg2 import pool
-from contextlib import contextmanager
-from os import environ
 import logging
+import asyncpg
+from os import environ
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
-db_pool = None
+
+POOL = None
 
 def init_pool():
-    """初始化数据库连接池。"""
-    global db_pool
+    global POOL
     try:
-        # --- 核心改动：直接使用 Render 提供的 DATABASE_URL ---
-        database_url = environ.get("DATABASE_URL")
-        if not database_url:
-            raise ValueError("DATABASE_URL 环境变量未设置。机器人无法连接到数据库。")
-
-        db_pool = pool.SimpleConnectionPool(
-            1, 20,
-            dsn=database_url  # 使用 DATABASE_URL 作为唯一的数据源名称
+        POOL = asyncpg.create_pool_sync(
+            dsn=environ.get("DATABASE_URL"),
+            min_size=1,
+            max_size=10
         )
         logger.info("数据库连接池初始化成功。")
     except Exception as e:
-        logger.critical(f"数据库连接失败: {e}")
+        logger.critical(f"数据库连接池初始化失败: {e}")
         raise
 
 @contextmanager
 def db_cursor():
-    """提供一个数据库游标的上下文管理器。"""
-    if not db_pool:
+    if not POOL:
         raise ConnectionError("数据库连接池未初始化。")
-    conn = db_pool.getconn()
+    conn = None
     try:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            yield cur
-            conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        conn = POOL.acquire()
+        yield conn
     finally:
-        db_pool.putconn(conn)
+        if conn:
+            POOL.release(conn)
 
 def create_tables():
-    """检查并创建所有需要的表。"""
-    # (此函数内容是正确的，保持不变)
-    commands = [
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id BIGINT PRIMARY KEY,
-            username VARCHAR(255),
-            first_name VARCHAR(255),
-            is_admin BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
-        )
-        """,
-        """
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS targets (
-            id BIGINT PRIMARY KEY,
-            username VARCHAR(255),
-            first_name VARCHAR(255),
-            upvotes INT DEFAULT 0,
-            downvotes INT DEFAULT 0,
-            first_reporter_id BIGINT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS votes (
-            voter_id BIGINT,
-            target_id BIGINT,
-            vote_type INT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
-            PRIMARY KEY (voter_id, target_id),
-            FOREIGN KEY (voter_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS tags (
-            id SERIAL PRIMARY KEY,
-            tag_text VARCHAR(255) UNIQUE,
-            tag_type INT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS applied_tags (
-            id SERIAL PRIMARY KEY,
-            vote_voter_id BIGINT,
-            vote_target_id BIGINT,
-            tag_id INT,
-            FOREIGN KEY (vote_voter_id, vote_target_id) REFERENCES votes(voter_id, target_id) ON DELETE CASCADE,
-            FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS favorites (
-            user_id BIGINT,
-            target_id BIGINT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
-            PRIMARY KEY (user_id, target_id),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
-        )
-        """
-    ]
-    
+    """
+    检查并创建所有需要的表。
+    核心修复：在 users 表中添加 full_name 字段。
+    """
     with db_cursor() as cur:
-        for command in commands:
-            cur.execute(command)
+        try:
+            # 升级 users 表，添加 full_name 列
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGINT PRIMARY KEY,
+                    username VARCHAR(255),
+                    full_name VARCHAR(255), -- 新增字段
+                    reputation INT DEFAULT 0,
+                    is_admin BOOLEAN DEFAULT FALSE
+                );
+            """)
+            
+            # 为了确保旧表也能更新，我们尝试添加列
+            # 如果列已存在，会静默失败，不影响程序
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN full_name VARCHAR(255);")
+                logger.info("成功为 users 表添加 full_name 列。")
+            except asyncpg.exceptions.DuplicateColumnError:
+                # 列已经存在，这是正常情况，无需操作
+                pass
 
-        cur.execute("SELECT COUNT(*) FROM tags")
-        if cur.fetchone()[0] == 0:
-            logger.info("数据库中没有标签，正在插入默认标签...")
-            default_tags = {
-                1: ["技术大佬", "交易爽快", "乐于助人", "信誉良好"],
-                -1: ["骗子", "态度恶劣", "鸽子王", "垃圾信息"]
-            }
-            for tag_type, tags in default_tags.items():
-                for tag in tags:
-                    cur.execute("INSERT INTO tags (tag_text, tag_type) VALUES (%s, %s) ON CONFLICT (tag_text) DO NOTHING", (tag, tag_type))
-            logger.info("默认标签已插入。")
-
-    logger.info("所有表都已成功检查/创建。")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tags (
+                    id SERIAL PRIMARY KEY,
+                    tag_name VARCHAR(255) UNIQUE NOT NULL,
+                    type VARCHAR(50) NOT NULL CHECK (type IN ('recommend', 'block'))
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS votes (
+                    id SERIAL PRIMARY KEY,
+                    nominator_id BIGINT REFERENCES users(id),
+                    nominee_id BIGINT REFERENCES users(id),
+                    tag_id INT REFERENCES tags(id),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(nominator_id, nominee_id, tag_id)
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS favorites (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(id),
+                    favorite_user_id BIGINT REFERENCES users(id),
+                    UNIQUE(user_id, favorite_user_id)
+                );
+            """)
+            logger.info("所有表都已成功检查/创建/更新。")
+        except Exception as e:
+            logger.error(f"创建或更新表时发生错误: {e}")
+            raise
