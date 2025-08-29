@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 # --- Webhook 模式所需的环境变量 ---
 TOKEN = environ.get("TELEGRAM_BOT_TOKEN")
-# Render 会自动提供 PORT 和 RENDER_EXTERNAL_URL
 PORT = int(environ.get('PORT', '8443'))
-WEBHOOK_URL = f"{environ.get('RENDER_EXTERNAL_URL')}/{TOKEN}"
+# Render 会自动提供 RENDER_EXTERNAL_URL
+RENDER_URL = environ.get('RENDER_EXTERNAL_URL')
 
 
 async def grant_creator_admin_privileges():
@@ -89,12 +89,17 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else: await query.answer("未知操作")
 
 async def post_init(application: Application):
-    """在应用启动后设置 Webhook 并授予创世神权限。"""
-    await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+    """在应用启动后授予创世神权限。Webhook 的设置由 run_webhook 自动完成。"""
     await grant_creator_admin_privileges()
 
 def main() -> None:
     logger.info("机器人正在启动 (Webhook 模式)...")
+
+    # --- 核心修复：增加对 RENDER_URL 的检查 ---
+    if not RENDER_URL:
+        logger.critical("错误: RENDER_EXTERNAL_URL 环境变量未设置。Webhook 模式无法启动。")
+        return
+
     try:
         init_pool()
         create_tables()
@@ -102,7 +107,6 @@ def main() -> None:
         logger.critical(f"数据库初始化失败，机器人无法启动: {e}")
         return
 
-    # --- 核心改动：使用 Webhook 模式配置 Application ---
     application = Application.builder().token(TOKEN).post_init(post_init).build()
     
     # 处理器注册保持不变
@@ -123,12 +127,13 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(all_button_handler))
     
     logger.info("所有处理器已注册。正在启动 Webhook 服务器...")
-
-    # --- 核心改动：启动 Webhook 服务器而不是轮询 ---
+    
+    # --- 核心修复：让 run_webhook 自己构建和设置 URL ---
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        webhook_url=WEBHOOK_URL
+        url_path=TOKEN,  # 将 Token 作为秘密路径
+        webhook_url=f"{RENDER_URL}/{TOKEN}" # 明确告诉框架完整的 URL
     )
     
     logger.info("机器人已停止。")
