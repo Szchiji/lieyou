@@ -6,13 +6,9 @@ from database import db_transaction
 from html import escape
 
 logger = logging.getLogger(__name__)
-cache = None
 
-def clear_leaderboard_cache():
-    """公开的函数，用于从外部模块清除排行榜缓存。"""
-    global cache
-    if cache is not None:
-        cache.clear()
+# 由于逻辑已高度动态，缓存变得复杂且可能导致数据不一致，暂时移除
+# 在高并发场景下可重新引入更精细的缓存策略
 
 async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
