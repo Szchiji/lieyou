@@ -8,12 +8,9 @@ logger = logging.getLogger(__name__)
 
 # 示例数据库函数，需要替换为你的实现
 async def db_transaction():
-    # 你的数据库上下文管理器
     pass
 
 async def get_reputation_summary(nominee_username, nominator_id):
-    # 查询并返回赞誉/警示统计和星盘状态
-    # 示例返回结构
     return {
         'recommend_count': 0,
         'block_count': 0,
@@ -21,15 +18,12 @@ async def get_reputation_summary(nominee_username, nominator_id):
     }
 
 async def get_voter_usernames(nominee_username, vote_type):
-    # 查询数据库返回所有赞誉者或警示者用户名列表
-    # 示例返回
     return []
 
 async def handle_nomination(update, context):
     message = update.message
     nominee_username = None
 
-    # 更宽容的正则，支持 @miss_maomi、@user_name 等
     match = re.search(r'@([A-Za-z0-9_]{5,})|查询\s*@([A-Za-z0-9_]{5,})', message.text)
     if match:
         nominee_username = match.group(1) or match.group(2)
@@ -95,16 +89,13 @@ async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_T
         _, _, vote_type, nominee_username = parts
         logger.info(f"vote_type: {vote_type}, nominee_username: {nominee_username}")
         message_content = await build_voters_view(nominee_username, vote_type)
-        logger.info(f"build_voters_view content: {message_content}")
         await query.edit_message_text(**message_content)
     except Exception as e:
         logger.error(f"处理rep_voters出错: {e}", exc_info=True)
         await query.answer("❌ 无法展示名单，请联系管理员。", show_alert=True)
 
 async def build_voters_view(nominee_username: str, vote_type: str):
-    logger.info(f"构建献祭者名单: {nominee_username}, 类型: {vote_type}")
-    voters = await get_voter_usernames(nominee_username, vote_type)  # 需替换为你的数据库查询
-    logger.info(f"voters: {voters}")
+    voters = await get_voter_usernames(nominee_username, vote_type)
     if not voters:
         text = f"没有任何{'赞誉' if vote_type == 'recommend' else '警示'}者。"
     else:
@@ -112,3 +103,7 @@ async def build_voters_view(nominee_username: str, vote_type: str):
         text += '\n'.join([f"@{escape(username)}" for username in voters])
     keyboard = [[InlineKeyboardButton("⬅️ 返回卷宗", callback_data=f"rep_summary_{nominee_username}")]]
     return {'text': text, 'reply_markup': InlineKeyboardMarkup(keyboard), 'parse_mode': 'HTML'}
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("按钮处理逻辑尚未定义。")
