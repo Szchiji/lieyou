@@ -11,8 +11,10 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    RegexHandler
 )
+from telegram.error import TimedOut, BadRequest
 from fastapi import FastAPI, Request, Response
 
 from database import init_pool, create_tables
@@ -21,6 +23,7 @@ from handlers.reputation import (
     show_reputation_summary, show_reputation_details, show_reputation_voters,
     show_voters_menu
 )
+# 移除了 init_cache，因为我们重构了 leaderboard
 from handlers.leaderboard import show_leaderboard
 from handlers.admin import (
     is_admin, god_mode_command, settings_menu, 
@@ -65,6 +68,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
     if user_is_admin:
         text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
     keyboard = [
+        # 直接链接到箴言选择界面
         [InlineKeyboardButton("🏆 英灵殿", callback_data="leaderboard_top_tagselect_1"),
          InlineKeyboardButton("☠️ 放逐深渊", callback_data="leaderboard_bottom_tagselect_1")],
         [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites")]
@@ -86,33 +90,79 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     try:
         await query.answer()
+    except TimedOut:
+        logger.warning(f"对 query {query.id} 的响应超时。")
     except Exception as e:
         logger.error(f"对 query {query.id} 的响应时发生未知错误: {e}", exc_info=True)
 
     data = query.data
     try:
-        if data.startswith("rep_"):
+        if data.startswith("admin_"):
+            if data == "admin_settings_menu": await settings_menu(update, context)
+            elif data == "admin_panel_tags": await tags_panel(update, context)
+            elif data == "admin_tags_add_recommend_prompt": await add_tag_prompt(update, context, "recommend")
+            elif data == "admin_tags_add_block_prompt": await add_tag_prompt(update, context, "block")
+            elif data.startswith("admin_tags_remove_menu_"): await remove_tag_menu(update, context, int(data.split("_")[-1]))
+            elif data.startswith("admin_tags_remove_confirm_"): await remove_tag_confirm(update, context, int(data.split("_")[-2]), int(data.split("_")[-1]))
+            elif data == "admin_tags_list": await list_all_tags(update, context)
+            elif data == "admin_panel_permissions": await permissions_panel(update, context)
+            elif data == "admin_perms_add_prompt": await add_admin_prompt(update, context)
+            elif data == "admin_perms_list": await list_admins(update, context)
+            elif data == "admin_perms_remove_menu": await remove_admin_menu(update, context)
+            elif data.startswith("admin_perms_remove_confirm_"): await remove_admin_confirm(update, context, int(data.split("_")[-1]))
+            elif data == "admin_panel_system": await system_settings_panel(update, context)
+            elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
+            elif data == "admin_leaderboard_panel": await leaderboard_panel(update, context)
+            elif data == "admin_leaderboard_remove_prompt": await remove_from_leaderboard_prompt(update, context)
+        
+        elif data.startswith("rep_"):
             if data.startswith("rep_detail_"): await show_reputation_details(update, context)
             elif data.startswith("rep_summary_"): await show_reputation_summary(update, context)
             elif data.startswith("rep_voters_menu_"): await show_voters_menu(update, context)
             elif data.startswith("rep_voters_"): await show_reputation_voters(update, context)
+        
+        elif data.startswith("leaderboard_"):
+            await show_leaderboard(update, context)
+        
+        elif data == "show_my_favorites": await my_favorites(update, context)
+        elif data.startswith("query_fav"): await handle_favorite_button(update, context)
+        elif data == "back_to_help": await help_command(update, context, from_button=True)
         elif data.startswith(("vote_", "tag_")): await reputation_button_handler(update, context)
         elif data == "noop": pass
         else: logger.warning(f"收到未知的回调数据: {data}")
     except Exception as e:
         logger.error(f"处理按钮回调 {data} 时发生错误: {e}", exc_info=True)
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'next_action' in context.user_data:
+        del context.user_data['next_action']
+        await update.message.reply_text("操作已取消。")
+    else:
+        await update.message.reply_text("当前没有正在进行的操作。")
+
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 
+ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
 ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
+ptb_app.add_handler(CommandHandler("cancel", cancel_command))
+# 移除了 /top 和 /bottom 命令，因为它们现在需要选择箴言
+ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
-ptb_app.add_handler(MessageHandler(filters.Regex(r'@(\w{5,})|查询\s*@(\w{5,})') & filters.ChatType.GROUPS, handle_nomination))
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
+
+nomination_pattern = r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))'
+ptb_app.add_handler(RegexHandler(
+    nomination_pattern,
+    handle_nomination,
+    filters=~filters.COMMAND & filters.ChatType.GROUPS
+))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 FastAPI 应用启动，正在初始化...")
     await init_pool()
     await create_tables()
+    # 不再需要初始化缓存
     await ptb_app.bot.delete_webhook(drop_pending_updates=True)
     await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     async with ptb_app:
