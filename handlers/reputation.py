@@ -106,8 +106,8 @@ async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TY
     """处理直接查询用户名的命令（群聊和私聊均可使用）"""
     message = update.message
     
-    # 通过正则表达式提取用户名
-    match = re.match(r'^查询\s+@(\w{5,})$', message.text)
+    # 修改正则表达式，确保可以匹配包含下划线的用户名
+    match = re.match(r'^查询\s+@(\w+)$', message.text)
     if match:
         nominee_username = match.group(1)
         nominator_id = update.effective_user.id
@@ -125,9 +125,14 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理在群聊中@用户的情况"""
     message = update.message
     nominee_username = None
-    if context.matches:
-        match = context.matches[0]
-        nominee_username = match.group(1) or match.group(2)
+    
+    # 修改以更好地处理带下划线的用户名
+    if update.message.text:
+        # 直接匹配@后面的所有单词字符（包括下划线）
+        matches = re.findall(r'@(\w+)', update.message.text)
+        if matches:
+            nominee_username = matches[0]
+    
     if not nominee_username:
         return
     
@@ -145,7 +150,20 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data_parts = query.data.split('_')
-    action, nominee_username = data_parts[0], data_parts[-1]
+    
+    # 确保正确解析用户名，保持完整用户名（包括可能的下划线）
+    action = data_parts[0]
+    if action in ["vote", "tag"]:
+        # 对于投票和标签，用户名在最后一部分
+        nominee_username = data_parts[-1]
+    else:
+        # 可能需要特殊处理其他类型的按钮
+        nominee_username = data_parts[-1] if len(data_parts) > 1 else None
+    
+    if not nominee_username:
+        await query.answer("❌ 错误：无法识别目标用户", show_alert=True)
+        return
+    
     nominator_id = query.from_user.id
     nominator_username = query.from_user.username
     
@@ -174,7 +192,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data=f"rep_summary_{nominee_username}")])
         
         type_text = '赞誉' if vote_type == 'recommend' else '警示'
-        await query.edit_message_text(f"✍️ **正在审判:** <code>@{escape(nominee_username)}</code>\n\n请为您的 **{type_text}** 选择一句箴言：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        await query.edit_message_text(f"✍️ <b>正在审判:</b> <code>@{escape(nominee_username)}</code>\n\n请为您的 <b>{type_text}</b> 选择一句箴言：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
     elif action == "tag":
         tag_id_str = data_parts[1]
@@ -227,7 +245,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    nominee_username = query.data.split('_')[-1]
+    # 确保正确提取用户名（使用_join而不是简单的split）
+    parts = query.data.split('_')
+    action = parts[0] + '_' + parts[1]  # rep_summary
+    # 将剩余部分作为用户名（可能包含下划线）
+    nominee_username = '_'.join(parts[2:]) if len(parts) > 2 else ''
+    
     nominator_id = query.from_user.id
     
     # 更新用户活动
@@ -291,7 +314,10 @@ async def build_detail_view(nominee_username: str):
 
 async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    nominee_username = query.data.split('_')[-1]
+    # 正确解析回调数据，保留完整用户名
+    parts = query.data.split('_')
+    action = parts[0] + '_' + parts[1]  # rep_detail
+    nominee_username = '_'.join(parts[2:])  # 将剩余部分作为用户名
     
     # 更新用户活动
     await update_user_activity(query.from_user.id, query.from_user.username)
@@ -316,7 +342,10 @@ async def build_voters_menu_view(nominee_username: str):
 
 async def show_voters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    nominee_username = query.data.split('_')[-1]
+    # 正确解析回调数据，保留完整用户名
+    parts = query.data.split('_')
+    action = parts[0] + '_' + parts[1] + '_' + parts[2]  # rep_voters_menu
+    nominee_username = '_'.join(parts[3:])  # 将剩余部分作为用户名
     
     # 更新用户活动
     await update_user_activity(query.from_user.id, query.from_user.username)
@@ -355,12 +384,18 @@ async def build_voters_view(nominee_username: str, vote_type: str):
 
 async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data_parts = query.data.split('_')
-    vote_type = data_parts[2]
-    nominee_username = data_parts[3]
-    
-    # 更新用户活动
-    await update_user_activity(query.from_user.id, query.from_user.username)
-    
-    message_content = await build_voters_view(nominee_username, vote_type)
-    await query.edit_message_text(**message_content)
+    # 正确解析回调数据，保留完整用户名
+    parts = query.data.split('_')
+    # rep_voters_recommend_username 或 rep_voters_block_username
+    if len(parts) >= 4:
+        action = parts[0] + '_' + parts[1]  # rep_voters
+        vote_type = parts[2]  # recommend 或 block
+        nominee_username = '_'.join(parts[3:])  # 将剩余部分作为用户名
+        
+        # 更新用户活动
+        await update_user_activity(query.from_user.id, query.from_user.username)
+        
+        message_content = await build_voters_view(nominee_username, vote_type)
+        await query.edit_message_text(**message_content)
+    else:
+        await query.answer("❌ 错误：无法解析用户信息", show_alert=True)
