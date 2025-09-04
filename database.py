@@ -73,6 +73,7 @@ async def create_tables():
         except Exception as e:
             logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
     async with pool.acquire() as conn:
+        # 检查votes表的结构并添加必要的字段
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS votes (
                 id SERIAL PRIMARY KEY,
@@ -83,6 +84,13 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # 确保vote_type和created_at列存在
+        try:
+            await conn.execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS vote_type TEXT NOT NULL DEFAULT 'recommend';")
+            await conn.execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
+            logger.info("✅ (数据库迁移) 'votes' 表字段检查完成。")
+        except Exception as e:
+            logger.warning(f"(数据库迁移) 添加字段失败: {e}")
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
@@ -181,10 +189,29 @@ async def get_system_stats():
         
         # 今日活跃统计
         today = datetime.now().date()
-        stats['today_votes'] = await conn.fetchval(
-            "SELECT COUNT(*) FROM votes WHERE DATE(created_at) = $1", 
-            today
-        )
+        
+        # 检查votes表是否有created_at列
+        has_created_at = False
+        try:
+            # 尝试查询列信息
+            column_info = await conn.fetch("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'votes' AND column_name = 'created_at'
+            """)
+            has_created_at = len(column_info) > 0
+        except Exception as e:
+            logger.error(f"检查votes表结构失败: {e}")
+        
+        # 根据是否有created_at列来调整查询
+        if has_created_at:
+            stats['today_votes'] = await conn.fetchval(
+                "SELECT COUNT(*) FROM votes WHERE DATE(created_at) = $1", 
+                today
+            )
+        else:
+            # 如果没有created_at列，只返回总票数
+            stats['today_votes'] = 0
+            logger.warning("votes表缺少created_at列，无法计算今日票数")
         
         # 最活跃用户
         most_active = await conn.fetch("""
