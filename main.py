@@ -564,12 +564,6 @@ def main():
     async def detailed_health():
         """详细健康检查"""
         try:
-            bot_info = await ptb_app.bot.get_me() if pt
-
-    @fastapi_app.get("/health", include_in_schema=False)
-    async def detailed_health():
-        """详细健康检查"""
-        try:
             bot_info = await ptb_app.bot.get_me() if ptb_app.bot else None
             return {
                 "status": "healthy",
