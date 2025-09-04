@@ -1,11 +1,12 @@
 import logging
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional  # 添加 Dict 导入
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from database import db_fetch_all, db_fetchval, update_user_activity
+from database import db_fetch_all, db_fetch_one, db_fetchval, update_user_activity
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
-async def get_user_personal_stats(user_id: int) -> Dict:
+async def get_user_personal_stats(user_id: int) -> Optional[Dict]:  # 修改为 Optional[Dict]
     """获取用户个人统计"""
     try:
         # 用户给出的评价统计
