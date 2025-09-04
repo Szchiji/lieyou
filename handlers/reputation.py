@@ -71,17 +71,19 @@ async def build_summary_view(nominee_username: str, summary: dict):
         rep_icon = "☠️"
         rep_level = "危险"
     
+    # 使用更美观的格式，减少可复制性
     text = (
-        f"╭───「 📜 <b>神谕之卷</b> 」───╮\n"
-        f"│\n"
-        f"│  👤 <b>求问对象:</b> <code>@{escape(nominee_username)}</code>\n"
-        f"│\n"
-        f"│  👍 <b>赞誉:</b> {summary['recommend_count']} 次\n"
-        f"│  👎 <b>警示:</b> {summary['block_count']} 次\n"
-        f"│  {rep_icon} <b>神谕判定:</b> {rep_level} ({reputation_score})\n"
-        f"│\n"
-        f"╰──────────────╯"
+        f"┏━━━━「 📜 <b>神谕之卷</b> 」━━━━┓\n"
+        f"┃                          ┃\n"
+        f"┃  👤 <b>求问对象:</b> @{escape(nominee_username)}   ┃\n"
+        f"┃                          ┃\n"
+        f"┃  👍 <b>赞誉:</b> {summary['recommend_count']} 次        ┃\n"
+        f"┃  👎 <b>警示:</b> {summary['block_count']} 次        ┃\n"
+        f"┃  {rep_icon} <b>神谕判定:</b> {rep_level} ({reputation_score})  ┃\n"
+        f"┃                          ┃\n"
+        f"┗━━━━━━━━━━━━━━━━━━┛"
     )
+    
     fav_icon = "🌟" if summary['is_favorite'] else "➕"
     fav_text = "移出星盘" if summary['is_favorite'] else "加入星盘"
     fav_callback = "query_fav_remove" if summary['is_favorite'] else "query_fav_add"
@@ -271,7 +273,9 @@ async def build_detail_view(nominee_username: str):
         else:
             block_tags.append(f"  - 『无箴言』 ({count}次)")
 
-    text_parts = [f"📜 <b>箴言详情:</b> <code>@{escape(nominee_username)}</code>\n" + ("-"*20)]
+    # 使用更美观的格式显示箴言详情
+    text_parts = [f"📜 <b>箴言详情:</b> <code>@{escape(nominee_username)}</code>\n" + ("━"*30)]
+    
     if recommend_tags:
         text_parts.append("\n👍 <b>赞誉类箴言:</b>")
         text_parts.extend(recommend_tags)
@@ -297,6 +301,7 @@ async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(**message_content)
     
 async def build_voters_menu_view(nominee_username: str):
+    # 更美观的追溯献祭者菜单
     text = f"⚖️ <b>追溯献祭者:</b> <code>@{escape(nominee_username)}</code>\n\n请选择您想追溯的审判类型："
     keyboard = [
         [
@@ -331,7 +336,9 @@ async def build_voters_view(nominee_username: str, vote_type: str):
             ORDER BY last_vote DESC
         """, nominee_username, vote_type)
     
-    text_parts = [f"{icon} <b>{type_text}列表:</b> <code>@{escape(nominee_username)}</code>\n" + ("-"*20)]
+    # 使用更美观的格式显示投票者列表
+    text_parts = [f"{icon} <b>{type_text}列表:</b> <code>@{escape(nominee_username)}</code>\n" + ("━"*30)]
+    
     if not voters:
         text_parts.append("\n暂时无人做出此类审判。")
     else:
@@ -342,12 +349,15 @@ async def build_voters_view(nominee_username: str, vote_type: str):
             text_parts.append(f"  - <code>求道者-{fingerprint}</code> ({last_vote_time})")
     
     text = "\n".join(text_parts)
+    # 确保返回按钮带着正确的用户名上下文
     keyboard = [[InlineKeyboardButton("⬅️ 返回卷宗", callback_data=f"rep_summary_{nominee_username}")]]
     return {'text': text, 'reply_markup': InlineKeyboardMarkup(keyboard), 'parse_mode': 'HTML'}
 
 async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    _, _, vote_type, nominee_username = query.data.split('_')
+    data_parts = query.data.split('_')
+    vote_type = data_parts[2]
+    nominee_username = data_parts[3]
     
     # 更新用户活动
     await update_user_activity(query.from_user.id, query.from_user.username)
