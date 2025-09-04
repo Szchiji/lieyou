@@ -149,21 +149,45 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data_parts = query.data.split('_')
+    data = query.data
     
-    # 确保正确解析用户名，保持完整用户名（包括可能的下划线）
-    action = data_parts[0]
-    if action in ["vote", "tag"]:
-        # 对于投票和标签，用户名在最后一部分
-        nominee_username = data_parts[-1]
+    # 更精确的解析方法
+    if data.startswith('vote_'):
+        # vote_recommend_username 或 vote_block_username
+        action = 'vote'
+        parts = data.split('_', 2)  # 只分割前两个下划线
+        if len(parts) == 3:
+            vote_type = parts[1]
+            nominee_username = parts[2]  # 保留完整用户名，包括可能的下划线
+        else:
+            await query.answer("❌ 数据格式错误", show_alert=True)
+            return
+    elif data.startswith('tag_'):
+        # tag_id_username 或 tag_notag_type_username
+        action = 'tag'
+        if data.startswith('tag_notag_'):
+            # 特殊处理无标签情况
+            parts = data.split('_', 3)  # tag_notag_type_username
+            if len(parts) == 4:
+                tag_id_str = 'notag'
+                vote_type = parts[2]
+                nominee_username = parts[3]
+            else:
+                await query.answer("❌ 数据格式错误", show_alert=True)
+                return
+        else:
+            # 正常标签情况
+            parts = data.split('_', 2)  # tag_id_username
+            if len(parts) == 3:
+                tag_id_str = parts[1]
+                nominee_username = parts[2]
+            else:
+                await query.answer("❌ 数据格式错误", show_alert=True)
+                return
     else:
-        # 可能需要特殊处理其他类型的按钮
-        nominee_username = data_parts[-1] if len(data_parts) > 1 else None
-    
-    if not nominee_username:
-        await query.answer("❌ 错误：无法识别目标用户", show_alert=True)
+        # 不是我们关心的回调数据
         return
-    
+        
     nominator_id = query.from_user.id
     nominator_username = query.from_user.username
     
@@ -171,14 +195,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update_user_activity(nominator_id, nominator_username)
 
     if action == "vote":
-        vote_type = data_parts[1]
         async with db_transaction() as conn:
-            # 检查用户是否已经对该用户进行过此类型的评价
-            existing_vote = await conn.fetchrow("""
-                SELECT id FROM votes 
-                WHERE nominator_id = $1 AND nominee_username = $2 AND vote_type = $3
-                AND created_at > NOW() - INTERVAL '24 hours'
-            """, nominator_id, nominee_username, vote_type)
+            # 检查votes表是否有所需字段
+            columns = await conn.fetch("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'votes' AND column_name IN ('vote_type', 'created_at')
+            """)
+            has_vote_type = any(col['column_name'] == 'vote_type' for col in columns)
+            has_created_at = any(col['column_name'] == 'created_at' for col in columns)
+            
+            # 如果缺少字段，尝试添加
+            if not has_vote_type:
+                try:
+                    await conn.execute("ALTER TABLE votes ADD COLUMN vote_type TEXT NOT NULL DEFAULT 'recommend';")
+                    logger.info("✅ 添加了'vote_type'列到votes表")
+                    has_vote_type = True
+                except Exception as e:
+                    logger.error(f"添加'vote_type'列失败: {e}")
+                    await query.answer("❌ 系统错误，请联系管理员", show_alert=True)
+                    return
+                
+            if not has_created_at:
+                try:
+                    await conn.execute("ALTER TABLE votes ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
+                    logger.info("✅ 添加了'created_at'列到votes表")
+                    has_created_at = True
+                except Exception as e:
+                    logger.error(f"添加'created_at'列失败: {e}")
+                    await query.answer("❌ 系统错误，请联系管理员", show_alert=True)
+                    return
+                    
+            # 现在检查用户是否已经对该用户进行过此类型的评价
+            if has_vote_type and has_created_at:
+                existing_vote = await conn.fetchrow("""
+                    SELECT id FROM votes 
+                    WHERE nominator_id = $1 AND nominee_username = $2 AND vote_type = $3
+                    AND created_at > NOW() - INTERVAL '24 hours'
+                """, nominator_id, nominee_username, vote_type)
+            else:
+                # 如果没有必要的列，简化检查
+                existing_vote = await conn.fetchrow("""
+                    SELECT id FROM votes 
+                    WHERE nominator_id = $1 AND nominee_username = $2
+                """, nominator_id, nominee_username)
             
             if existing_vote:
                 await query.answer("⚠️ 你已在24小时内对此存在做出过相同判断。", show_alert=True)
@@ -195,30 +254,40 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✍️ <b>正在审判:</b> <code>@{escape(nominee_username)}</code>\n\n请为您的 <b>{type_text}</b> 选择一句箴言：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
     elif action == "tag":
-        tag_id_str = data_parts[1]
+        # 确认votes表有必要的列
         async with db_transaction() as conn:
+            # 检查并添加缺失的列
+            columns = await conn.fetch("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'votes' AND column_name IN ('vote_type', 'created_at')
+            """)
+            column_names = [col['column_name'] for col in columns]
+            
+            if 'vote_type' not in column_names:
+                await conn.execute("ALTER TABLE votes ADD COLUMN vote_type TEXT NOT NULL DEFAULT 'recommend';")
+                logger.info("✅ 添加了'vote_type'列到votes表")
+                
+            if 'created_at' not in column_names:
+                await conn.execute("ALTER TABLE votes ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
+                logger.info("✅ 添加了'created_at'列到votes表")
+                
+            # 继续处理标签
             if tag_id_str == 'notag':
-                vote_type, tag_id, tag_name = data_parts[2], None, None
+                vote_type = parts[2]
+                tag_id, tag_name = None, None
             else:
-                tag_id = int(tag_id_str)
-                tag_info = await conn.fetchrow("SELECT type, tag_name FROM tags WHERE id = $1", tag_id)
-                if not tag_info:
-                    await query.answer("❌ 错误：此箴言已不存在。", show_alert=True)
+                try:
+                    tag_id = int(tag_id_str)
+                    tag_info = await conn.fetchrow("SELECT type, tag_name FROM tags WHERE id = $1", tag_id)
+                    if not tag_info:
+                        await query.answer("❌ 错误：此箴言已不存在。", show_alert=True)
+                        return
+                    vote_type, tag_name = tag_info['type'], tag_info['tag_name']
+                except ValueError:
+                    await query.answer("❌ 错误：标签ID无效", show_alert=True)
                     return
-                vote_type, tag_name = tag_info['type'], tag_info['tag_name']
             
-            # 检查24小时内是否已评价
-            existing_vote = await conn.fetchrow("""
-                SELECT id FROM votes 
-                WHERE nominator_id = $1 AND nominee_username = $2 AND vote_type = $3
-                AND created_at > NOW() - INTERVAL '24 hours'
-            """, nominator_id, nominee_username, vote_type)
-            
-            if existing_vote:
-                await query.answer("⚠️ 你已在24小时内对此存在做出过相同判断。", show_alert=True)
-                return
-            
-            # 添加投票
+            # 添加投票 - 使用安全的SQL语句
             await conn.execute("""
                 INSERT INTO votes (nominator_id, nominee_username, vote_type, tag_id) 
                 VALUES ($1, $2, $3, $4)
@@ -263,6 +332,20 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
 
 async def build_detail_view(nominee_username: str):
     async with db_transaction() as conn:
+        # 检查votes表是否有vote_type列
+        columns = await conn.fetch("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'votes' AND column_name = 'vote_type'
+        """)
+        has_vote_type = len(columns) > 0
+        
+        if not has_vote_type:
+            # 如果没有vote_type列，返回一个简化的视图
+            text = f"📜 <b>箴言详情:</b> <code>@{escape(nominee_username)}</code>\n\n" + \
+                   "⚠️ 系统正在维护中，暂时无法查看详情。请稍后再试。"
+            keyboard = [[InlineKeyboardButton("⬅️ 返回卷宗", callback_data=f"rep_summary_{nominee_username}")]]
+            return {'text': text, 'reply_markup': InlineKeyboardMarkup(keyboard), 'parse_mode': 'HTML'}
+        
         # 获取按标签分组的投票
         votes = await conn.fetch("""
             SELECT t.type, t.tag_name, COUNT(v.id) as count 
@@ -355,8 +438,26 @@ async def show_voters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def build_voters_view(nominee_username: str, vote_type: str):
     type_text, icon = ("赞誉者", "👍") if vote_type == "recommend" else ("警示者", "👎")
+    
+    # 检查votes表结构
     async with db_transaction() as conn:
-        # 获取投票者列表以及他们的投票时间
+        columns = await conn.fetch("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'votes' AND column_name IN ('vote_type', 'created_at')
+        """)
+        column_names = [col['column_name'] for col in columns]
+        
+        has_vote_type = 'vote_type' in column_names
+        has_created_at = 'created_at' in column_names
+        
+        if not has_vote_type or not has_created_at:
+            # 如果缺少必要的列，显示错误消息
+            text = f"{icon} <b>{type_text}列表:</b> <code>@{escape(nominee_username)}</code>\n\n" + \
+                   "⚠️ 系统正在维护中，暂时无法查看献祭者。请稍后再试。"
+            keyboard = [[InlineKeyboardButton("⬅️ 返回卷宗", callback_data=f"rep_summary_{nominee_username}")]]
+            return {'text': text, 'reply_markup': InlineKeyboardMarkup(keyboard), 'parse_mode': 'HTML'}
+        
+        # 获取投票者列表
         voters = await conn.fetch("""
             SELECT DISTINCT nominator_id, MAX(created_at) as last_vote
             FROM votes 
