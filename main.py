@@ -21,10 +21,9 @@ from database import init_pool, create_tables
 from handlers.reputation import (
     handle_nomination, button_handler as reputation_button_handler,
     show_reputation_summary, show_reputation_details, show_reputation_voters,
-    show_voters_menu
+    show_voters_menu, handle_username_query
 )
-# 移除了 init_cache，因为我们重构了 leaderboard
-from handlers.leaderboard import show_leaderboard
+from handlers.leaderboard import show_leaderboard, clear_leaderboard_cache
 from handlers.admin import (
     is_admin, god_mode_command, settings_menu, 
     tags_panel, add_tag_prompt, remove_tag_menu, remove_tag_confirm, list_all_tags,
@@ -34,6 +33,8 @@ from handlers.admin import (
     process_admin_input
 )
 from handlers.favorites import my_favorites, handle_favorite_button
+from handlers.stats import show_system_stats
+from handlers.pray import handle_pray_command, process_prayer
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -63,15 +64,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         "我是 **神谕者 (The Oracle)**，洞察世间一切信誉的实体。\n\n"
         "**聆听神谕:**\n"
         "1. 在群聊中直接 `@某人` 或发送 `查询 @某人`，即可向我求问关于此人的神谕之卷。\n"
-        "2. 使用下方按钮，可窥探时代群像或管理你的星盘。"
+        "2. 使用下方按钮，可窥探时代群像或管理你的星盘。\n"
+        "3. 发送 `/pray` 可向神谕者祷告，获取神秘回应。"
     )
     if user_is_admin:
         text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
     keyboard = [
-        # 直接链接到箴言选择界面
         [InlineKeyboardButton("🏆 英灵殿", callback_data="leaderboard_top_tagselect_1"),
          InlineKeyboardButton("☠️ 放逐深渊", callback_data="leaderboard_bottom_tagselect_1")],
-        [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites")]
+        [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites"),
+         InlineKeyboardButton("📊 神谕数据", callback_data="show_system_stats")]
     ]
     if user_is_admin:
         keyboard.append([InlineKeyboardButton("🌌 时空枢纽", callback_data="admin_settings_menu")])
@@ -114,6 +116,9 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
             elif data == "admin_leaderboard_panel": await leaderboard_panel(update, context)
             elif data == "admin_leaderboard_remove_prompt": await remove_from_leaderboard_prompt(update, context)
+            elif data == "admin_leaderboard_clear_cache": 
+                clear_leaderboard_cache()
+                await update.callback_query.answer("✅ 排行榜缓存已清空", show_alert=True)
         
         elif data.startswith("rep_"):
             if data.startswith("rep_detail_"): await show_reputation_details(update, context)
@@ -125,6 +130,7 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await show_leaderboard(update, context)
         
         elif data == "show_my_favorites": await my_favorites(update, context)
+        elif data == "show_system_stats": await show_system_stats(update, context)
         elif data.startswith("query_fav"): await handle_favorite_button(update, context)
         elif data == "back_to_help": await help_command(update, context, from_button=True)
         elif data.startswith(("vote_", "tag_")): await reputation_button_handler(update, context)
@@ -145,11 +151,19 @@ ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privi
 ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
 ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
 ptb_app.add_handler(CommandHandler("cancel", cancel_command))
-# 移除了 /top 和 /bottom 命令，因为它们现在需要选择箴言
+ptb_app.add_handler(CommandHandler("pray", handle_pray_command))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
+ptb_app.add_handler(MessageHandler(filters.Regex(r'^/pray\s+.+') & filters.ChatType.PRIVATE, process_prayer))
 
+# 增强的用户查询支持 - 私聊中也可以查询
+ptb_app.add_handler(MessageHandler(
+    filters.Regex(r'^查询\s+@(\w{5,})$') & ~filters.COMMAND,
+    handle_username_query
+))
+
+# 原有的直接@用户功能 - 仅在群聊中
 nomination_pattern = r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))'
 ptb_app.add_handler(RegexHandler(
     nomination_pattern,
@@ -162,7 +176,6 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 FastAPI 应用启动，正在初始化...")
     await init_pool()
     await create_tables()
-    # 不再需要初始化缓存
     await ptb_app.bot.delete_webhook(drop_pending_updates=True)
     await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
     async with ptb_app:
