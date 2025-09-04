@@ -171,7 +171,7 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
         )
         
         if existing_vote:
-            vote_text = "修改评价" if existing_vote else "重新评价"
+            vote_text = "修改评价"
             action_buttons.append(InlineKeyboardButton(f"✏️ {vote_text}", callback_data=f"vote_edit_{target_id}"))
         else:
             action_buttons.extend([
@@ -233,7 +233,8 @@ async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_
             f"📝 **{display_name}** 的详细评价\n\n暂无评价记录。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 返回", callback_data=f"rep_summary_{target_id}")
-            ]])
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
         )
         return
     
@@ -553,6 +554,123 @@ async def handle_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     # 重新显示投票界面
     await handle_vote_button(update, context)
 
+async def handle_vote_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理添加评论"""
+    query = update.callback_query
+    data = query.data
+    user_id = update.effective_user.id
+    
+    data_parts = data.split("_")
+    target_id = int(data_parts[2])
+    is_positive = data_parts[3] == "True"
+    
+    await query.answer()
+    
+    # 获取目标用户信息
+    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
+    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
+    
+    vote_type_text = "好评" if is_positive else "差评"
+    
+    message = f"💬 **为 {display_name} 添加评论** - {vote_type_text}\n\n"
+    message += "请发送您的评论内容（最多200字符）：\n\n"
+    message += "发送 /cancel 取消操作"
+    
+    keyboard = [[InlineKeyboardButton("🔙 返回", callback_data=f"vote_{'positive' if is_positive else 'negative'}_{target_id}")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    
+    # 设置等待用户输入评论
+    context.user_data['comment_input'] = {
+        'target_id': target_id,
+        'is_positive': is_positive
+    }
+
+async def handle_vote_submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理提交评价"""
+    query = update.callback_query
+    data = query.data
+    user_id = update.effective_user.id
+    
+    data_parts = data.split("_")
+    target_id = int(data_parts[2])
+    is_positive = data_parts[3] == "True"
+    
+    await query.answer()
+    
+    # 获取当前投票状态
+    current_vote = context.user_data.get('current_vote', {})
+    if current_vote.get('target_id') != target_id:
+        await query.answer("❌ 状态错误，请重新开始", show_alert=True)
+        return
+    
+    selected_tags = current_vote.get('selected_tags', [])
+    comment = current_vote.get('comment')
+    
+    try:
+        # 提交评价到数据库
+        async with db_transaction() as conn:
+            await conn.execute("""
+                INSERT INTO reputations (target_id, voter_id, is_positive, tag_ids, comment)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (target_id, voter_id) 
+                DO UPDATE SET 
+                    is_positive = $3,
+                    tag_ids = $4,
+                    comment = $5,
+                    created_at = NOW()
+            """, target_id, user_id, is_positive, selected_tags, comment)
+        
+        # 清除当前投票状态
+        if 'current_vote' in context.user_data:
+            del context.user_data['current_vote']
+        
+        # 获取目标用户信息
+        target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
+        display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
+        
+        vote_type_text = "好评" if is_positive else "差评"
+        
+        message = f"✅ **评价提交成功**\n\n"
+        message += f"已为 **{display_name}** 提交{vote_type_text}\n"
+        
+        if selected_tags:
+            # 获取标签名称
+            tags = await db_fetch_all("SELECT id, name, type FROM tags WHERE id = ANY($1)", selected_tags)
+            tag_names = []
+            for tag in tags:
+                emoji = "🏅" if tag['type'] == 'recommend' else "⚠️"
+                tag_names.append(f"{emoji}{tag['name']}")
+            if tag_names:
+                message += f"标签: {', '.join(tag_names)}\n"
+        
+        if comment:
+            message += f"评论: {comment}\n"
+        
+        message += "\n感谢您的评价！"
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 查看用户信息", callback_data=f"rep_summary_{target_id}")],
+            [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        
+        # 清除排行榜缓存
+        try:
+            from handlers.leaderboard import clear_leaderboard_cache
+            clear_leaderboard_cache()
+        except ImportError:
+            pass
+        
+        logger.info(f"用户 {user_id} 为用户 {target_id} 提交了评价")
+        
+    except Exception as e:
+        logger.error(f"提交评价失败: {e}", exc_info=True)
+        await query.answer("❌ 提交评价失败，请重试", show_alert=True)
+
 async def handle_favorite_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理收藏切换"""
     query = update.callback_query
@@ -583,3 +701,48 @@ async def handle_favorite_toggle(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logger.error(f"切换收藏状态失败: {e}")
         await query.answer("❌ 操作失败", show_alert=True)
+
+async def handle_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理评论输入"""
+    user_id = update.effective_user.id
+    comment_input = context.user_data.get('comment_input')
+    
+    if not comment_input:
+        return False
+    
+    comment = update.message.text.strip()
+    
+    if len(comment) > 200:
+        await update.message.reply_text("❌ 评论内容过长，请控制在200字符以内。")
+        return True
+    
+    target_id = comment_input['target_id']
+    is_positive = comment_input['is_positive']
+    
+    # 更新当前投票状态
+    current_vote = context.user_data.get('current_vote', {})
+    current_vote['comment'] = comment
+    context.user_data['current_vote'] = current_vote
+    
+    # 清除评论输入状态
+    del context.user_data['comment_input']
+    
+    # 获取目标用户信息
+    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
+    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
+    
+    vote_type_text = "好评" if is_positive else "差评"
+    
+    message = f"✅ **评论已添加**\n\n"
+    message += f"为 **{display_name}** 的{vote_type_text}添加了评论：\n"
+    message += f"💬 {comment}\n\n"
+    message += "现在可以提交评价了。"
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ 提交评价", callback_data=f"vote_submit_{target_id}_{is_positive}")],
+        [InlineKeyboardButton("🔙 返回编辑", callback_data=f"vote_{'positive' if is_positive else 'negative'}_{target_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    return True
