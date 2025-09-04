@@ -72,6 +72,7 @@ async def create_tables():
             logger.info("✅ (数据库迁移) 'tags' 表字段检查完成。")
         except Exception as e:
             logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
+    
     async with pool.acquire() as conn:
         # 检查votes表的结构并添加必要的字段
         await conn.execute("""
@@ -84,6 +85,14 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        
+        # 确保tag_id可以为NULL (如果表已经存在)
+        try:
+            await conn.execute("ALTER TABLE votes ALTER COLUMN tag_id DROP NOT NULL;")
+        except Exception as e:
+            # 可能已经是NULL或者列不存在
+            logger.debug(f"设置tag_id为可NULL列时遇到异常: {e}")
+            
         # 确保vote_type和created_at列存在
         try:
             await conn.execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS vote_type TEXT NOT NULL DEFAULT 'recommend';")
@@ -91,6 +100,7 @@ async def create_tables():
             logger.info("✅ (数据库迁移) 'votes' 表字段检查完成。")
         except Exception as e:
             logger.warning(f"(数据库迁移) 添加字段失败: {e}")
+    
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
