@@ -114,19 +114,6 @@ async def create_tables():
         except Exception as e:
             logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
     
-    # 新增：prayers表，用于存储用户祈祷内容和回应
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS prayers (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                prayer_text TEXT NOT NULL,
-                response_text TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                response_at TIMESTAMP WITH TIME ZONE
-            );
-        """)
-    
     # 初始化默认设置
     await initialize_default_settings()
     logger.info("✅ (启动流程) 所有数据表检查/创建/迁移完毕。")
@@ -135,8 +122,6 @@ async def initialize_default_settings():
     """初始化默认系统设置"""
     default_settings = {
         'leaderboard_cache_ttl': '300',  # 5分钟缓存
-        'max_prayers_per_day': '3',      # 每用户每日最大祈祷次数
-        'prayer_cooldown': '3600',       # 祈祷冷却时间（秒）
     }
     
     async with db_transaction() as conn:
@@ -210,11 +195,5 @@ async def get_system_stats():
             LIMIT 1
         """)
         stats['most_active_user'] = most_active[0]['nominee_username'] if most_active else None
-        
-        # 今日祈祷统计
-        stats['today_prayers'] = await conn.fetchval(
-            "SELECT COUNT(*) FROM prayers WHERE DATE(created_at) = $1",
-            today
-        )
         
         return stats
