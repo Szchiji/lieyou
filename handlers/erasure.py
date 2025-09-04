@@ -120,7 +120,8 @@ async def confirm_given_votes_erasure(update: Update, context: ContextTypes.DEFA
             "ℹ️ **没有需要清除的数据**\n\n您还没有给任何人评价过。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 返回", callback_data="erasure_menu")
-            ]])
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
         )
         return
     
@@ -158,7 +159,8 @@ async def confirm_received_votes_erasure(update: Update, context: ContextTypes.D
             "ℹ️ **没有需要清除的数据**\n\n您还没有收到任何评价。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 返回", callback_data="erasure_menu")
-            ]])
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
         )
         return
     
@@ -300,12 +302,3 @@ async def execute_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             ]]),
             parse_mode=ParseMode.MARKDOWN
         )
-
-# 为了向后兼容，提供一些别名函数
-async def erasure_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """抹除室菜单别名"""
-    await show_erasure_menu(update, context)
-
-async def process_erasure_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理抹除动作别名"""
-    await handle_erasure_functions(update, context)
