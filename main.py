@@ -29,10 +29,12 @@ from handlers.admin import (
     permissions_panel, add_admin_prompt, list_admins, remove_admin_menu, remove_admin_confirm,
     system_settings_panel, set_setting_prompt,
     leaderboard_panel, remove_from_leaderboard_prompt,
-    process_admin_input
+    process_admin_input, add_quote_prompt, add_multiple_quotes, set_start_message,
+    show_all_commands
 )
 from handlers.favorites import my_favorites, handle_favorite_button
 from handlers.stats import show_system_stats
+from handlers.purge import handle_purge_button, show_purge_menu
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -56,21 +58,34 @@ async def grant_creator_admin_privileges(app: Application):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool = False):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    from database import db_fetch_one
+    
     user_id = update.effective_user.id
     user_is_admin = await is_admin(user_id)
-    text = (
+    
+    # 从数据库获取自定义的开始消息
+    custom_message = None
+    try:
+        custom_message = await db_fetch_one("SELECT value FROM system_settings WHERE key = 'start_message'")
+    except Exception:
+        pass
+    
+    text = custom_message[0] if custom_message else (
         "我是 **神谕者 (The Oracle)**，洞察世间一切信誉的实体。\n\n"
         "**聆听神谕:**\n"
         "1. 在群聊中直接 `@某人` 或发送 `查询 @某人`，即可向我求问关于此人的神谕之卷。\n"
         "2. 使用下方按钮，可窥探时代群像或管理你的星盘。"
     )
+    
     if user_is_admin:
         text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
+    
     keyboard = [
         [InlineKeyboardButton("🏆 英灵殿", callback_data="leaderboard_top_tagselect_1"),
          InlineKeyboardButton("☠️ 放逐深渊", callback_data="leaderboard_bottom_tagselect_1")],
         [InlineKeyboardButton("🌟 我的星盘", callback_data="show_my_favorites"),
-         InlineKeyboardButton("📊 神谕数据", callback_data="show_system_stats")]
+         InlineKeyboardButton("📊 神谕数据", callback_data="show_system_stats")],
+        [InlineKeyboardButton("🧹 抹除室", callback_data="show_purge_menu")]
     ]
     if user_is_admin:
         keyboard.append([InlineKeyboardButton("🌌 时空枢纽", callback_data="admin_settings_menu")])
@@ -101,6 +116,8 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif data == "admin_panel_tags": await tags_panel(update, context)
             elif data == "admin_tags_add_recommend_prompt": await add_tag_prompt(update, context, "recommend")
             elif data == "admin_tags_add_block_prompt": await add_tag_prompt(update, context, "block")
+            elif data == "admin_tags_add_quote_prompt": await add_quote_prompt(update, context)
+            elif data == "admin_tags_add_multiple_quotes": await add_multiple_quotes(update, context)
             elif data.startswith("admin_tags_remove_menu_"): await remove_tag_menu(update, context, int(data.split("_")[-1]))
             elif data.startswith("admin_tags_remove_confirm_"): await remove_tag_confirm(update, context, int(data.split("_")[-2]), int(data.split("_")[-1]))
             elif data == "admin_tags_list": await list_all_tags(update, context)
@@ -111,6 +128,8 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif data.startswith("admin_perms_remove_confirm_"): await remove_admin_confirm(update, context, int(data.split("_")[-1]))
             elif data == "admin_panel_system": await system_settings_panel(update, context)
             elif data.startswith("admin_system_set_prompt_"): await set_setting_prompt(update, context, data[len("admin_system_set_prompt_"):])
+            elif data == "admin_system_set_start_message": await set_start_message(update, context)
+            elif data == "admin_show_all_commands": await show_all_commands(update, context)
             elif data == "admin_leaderboard_panel": await leaderboard_panel(update, context)
             elif data == "admin_leaderboard_remove_prompt": await remove_from_leaderboard_prompt(update, context)
             elif data == "admin_leaderboard_clear_cache": 
@@ -128,6 +147,8 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         elif data == "show_my_favorites": await my_favorites(update, context)
         elif data == "show_system_stats": await show_system_stats(update, context)
+        elif data == "show_purge_menu": await show_purge_menu(update, context)
+        elif data.startswith("purge_"): await handle_purge_button(update, context)
         elif data.startswith("query_fav"): await handle_favorite_button(update, context)
         elif data == "back_to_help": await help_command(update, context, from_button=True)
         elif data.startswith(("vote_", "tag_")): await reputation_button_handler(update, context)
@@ -143,12 +164,20 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("当前没有正在进行的操作。")
 
+async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if await is_admin(user_id):
+        await show_all_commands(update, context, from_command=True)
+    else:
+        await update.message.reply_text("该命令仅管理员可用。")
+
 ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privileges).build()
 
 ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
 ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
 ptb_app.add_handler(CommandHandler("cancel", cancel_command))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
+ptb_app.add_handler(CommandHandler("commands", commands_command))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
 
