@@ -34,7 +34,21 @@ async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  - 警示箴言: {stats['block_tags']} 种",
     ]
     
-    # 如果有"今日祈祷"数据，添加到统计中
-    if 'today_prayers' in stats:
-        text_parts.append(f"\n🙏 <b>祈祷数据:</b>")
-        text_parts.append(f"  - 今日祈祷: {stats['today_prayers']} 次")
+    # 如果有最活跃用户，添加到统计中
+    if stats.get('most_active_user'):
+        text_parts.append(f"\n🌟 <b>最活跃存在:</b> @{stats['most_active_user']}")
+    
+    text = "\n".join(text_parts)
+    
+    # 创建按钮
+    keyboard = [
+        [InlineKeyboardButton("🔄 刷新数据", callback_data="show_system_stats")],
+        [InlineKeyboardButton("🌍 返回凡界", callback_data="back_to_help")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # 发送或更新消息
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
