@@ -145,36 +145,46 @@ async def get_leaderboard_view(leaderboard_type, tag_id, page=1):
             """)
             subtitle = "综合神谕"
         else:
-            # 查询特定标签的评价
-            tag_info = await conn.fetchrow("SELECT tag_name, type FROM tags WHERE id = $1", tag_id)
-            if not tag_info:
+            # 修复：确保tag_id是整数类型
+            try:
+                # 查询特定标签的评价，先将tag_id转换为整数
+                tag_id_int = int(tag_id)
+                tag_info = await conn.fetchrow("SELECT tag_name, type FROM tags WHERE id = $1", tag_id_int)
+                if not tag_info:
+                    return {
+                        'text': "❌ 错误：请求的箴言不存在。",
+                        'reply_markup': InlineKeyboardMarkup([[InlineKeyboardButton("返回", callback_data=f"leaderboard_{leaderboard_type}_tagselect_1")]])
+                    }
+                
+                # 统计带有此标签的投票对每个用户的数量
+                profiles = await conn.fetch(f"""
+                    SELECT v.nominee_username as username, 
+                           COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) as recommend_count,
+                           COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END) as block_count
+                    FROM votes v
+                    WHERE v.tag_id = $1
+                    GROUP BY v.nominee_username
+                    ORDER BY (COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) - 
+                             COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END)) {order_by},
+                             (COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) + 
+                             COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END)) DESC
+                    LIMIT {page_size} OFFSET {offset}
+                """, tag_id_int)
+                
+                # 获取总记录数
+                total_count = await conn.fetchval("""
+                    SELECT COUNT(DISTINCT nominee_username) FROM votes
+                    WHERE tag_id = $1
+                """, tag_id_int)
+                
+                subtitle = f"箴言「{tag_info['tag_name']}」"
+            except ValueError:
+                # 如果tag_id不是有效的整数
+                logger.error(f"无效的tag_id: {tag_id}")
                 return {
-                    'text': "❌ 错误：请求的箴言不存在。",
+                    'text': "❌ 错误：无效的箴言ID。",
                     'reply_markup': InlineKeyboardMarkup([[InlineKeyboardButton("返回", callback_data=f"leaderboard_{leaderboard_type}_tagselect_1")]])
                 }
-            
-            # 统计带有此标签的投票对每个用户的数量
-            profiles = await conn.fetch(f"""
-                SELECT v.nominee_username as username, 
-                       COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) as recommend_count,
-                       COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END) as block_count
-                FROM votes v
-                WHERE v.tag_id = $1
-                GROUP BY v.nominee_username
-                ORDER BY (COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) - 
-                         COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END)) {order_by},
-                         (COUNT(CASE WHEN v.vote_type = 'recommend' THEN 1 END) + 
-                         COUNT(CASE WHEN v.vote_type = 'block' THEN 1 END)) DESC
-                LIMIT {page_size} OFFSET {offset}
-            """, tag_id)
-            
-            # 获取总记录数
-            total_count = await conn.fetchval("""
-                SELECT COUNT(DISTINCT nominee_username) FROM votes
-                WHERE tag_id = $1
-            """, tag_id)
-            
-            subtitle = f"箴言「{tag_info['tag_name']}」"
     
     # 计算总页数
     total_pages = (total_count + page_size - 1) // page_size or 1
