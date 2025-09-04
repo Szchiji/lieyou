@@ -201,43 +201,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SELECT column_name FROM information_schema.columns 
                 WHERE table_name = 'votes' AND column_name IN ('vote_type', 'created_at')
             """)
-            has_vote_type = any(col['column_name'] == 'vote_type' for col in columns)
-            has_created_at = any(col['column_name'] == 'created_at' for col in columns)
+            column_names = [col['column_name'] for col in columns]
             
             # 如果缺少字段，尝试添加
-            if not has_vote_type:
+            if 'vote_type' not in column_names:
                 try:
                     await conn.execute("ALTER TABLE votes ADD COLUMN vote_type TEXT NOT NULL DEFAULT 'recommend';")
                     logger.info("✅ 添加了'vote_type'列到votes表")
-                    has_vote_type = True
                 except Exception as e:
                     logger.error(f"添加'vote_type'列失败: {e}")
                     await query.answer("❌ 系统错误，请联系管理员", show_alert=True)
                     return
                 
-            if not has_created_at:
+            if 'created_at' not in column_names:
                 try:
                     await conn.execute("ALTER TABLE votes ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
                     logger.info("✅ 添加了'created_at'列到votes表")
-                    has_created_at = True
                 except Exception as e:
                     logger.error(f"添加'created_at'列失败: {e}")
                     await query.answer("❌ 系统错误，请联系管理员", show_alert=True)
                     return
                     
             # 现在检查用户是否已经对该用户进行过此类型的评价
-            if has_vote_type and has_created_at:
-                existing_vote = await conn.fetchrow("""
-                    SELECT id FROM votes 
-                    WHERE nominator_id = $1 AND nominee_username = $2 AND vote_type = $3
-                    AND created_at > NOW() - INTERVAL '24 hours'
-                """, nominator_id, nominee_username, vote_type)
-            else:
-                # 如果没有必要的列，简化检查
-                existing_vote = await conn.fetchrow("""
-                    SELECT id FROM votes 
-                    WHERE nominator_id = $1 AND nominee_username = $2
-                """, nominator_id, nominee_username)
+            existing_vote = await conn.fetchrow("""
+                SELECT id FROM votes 
+                WHERE nominator_id = $1 AND nominee_username = $2 AND vote_type = $3
+                AND created_at > NOW() - INTERVAL '24 hours'
+            """, nominator_id, nominee_username, vote_type)
             
             if existing_vote:
                 await query.answer("⚠️ 你已在24小时内对此存在做出过相同判断。", show_alert=True)
@@ -270,6 +260,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if 'created_at' not in column_names:
                 await conn.execute("ALTER TABLE votes ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
                 logger.info("✅ 添加了'created_at'列到votes表")
+            
+            # 检查tag_id是否允许为null
+            tag_id_nullable = False
+            try:
+                constraints = await conn.fetch("""
+                    SELECT is_nullable 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'votes' AND column_name = 'tag_id'
+                """)
+                tag_id_nullable = constraints and constraints[0]['is_nullable'] == 'YES'
+                
+                if not tag_id_nullable:
+                    # 修改表允许tag_id为NULL
+                    await conn.execute("ALTER TABLE votes ALTER COLUMN tag_id DROP NOT NULL;")
+                    logger.info("✅ 修改了votes表的tag_id列允许NULL值")
+                    tag_id_nullable = True
+            except Exception as e:
+                logger.error(f"检查或修改tag_id约束失败: {e}")
                 
             # 继续处理标签
             if tag_id_str == 'notag':
@@ -287,21 +295,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.answer("❌ 错误：标签ID无效", show_alert=True)
                     return
             
-            # 添加投票 - 使用安全的SQL语句
-            await conn.execute("""
-                INSERT INTO votes (nominator_id, nominee_username, vote_type, tag_id) 
-                VALUES ($1, $2, $3, $4)
-            """, nominator_id, nominee_username, vote_type, tag_id)
-            
-            # 更新声誉档案
-            count_col = "recommend_count" if vote_type == "recommend" else "block_count"
-            await conn.execute(f"""
-                INSERT INTO reputation_profiles (username, {count_col}, last_updated) 
-                VALUES ($1, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT (username) DO UPDATE 
-                SET {count_col} = reputation_profiles.{count_col} + 1,
-                    last_updated = CURRENT_TIMESTAMP
-            """, nominee_username)
+            try:
+                # 添加投票 - 使用安全的SQL语句
+                await conn.execute("""
+                    INSERT INTO votes (nominator_id, nominee_username, vote_type, tag_id) 
+                    VALUES ($1, $2, $3, $4)
+                """, nominator_id, nominee_username, vote_type, tag_id)
+                
+                # 更新声誉档案
+                count_col = "recommend_count" if vote_type == "recommend" else "block_count"
+                await conn.execute(f"""
+                    INSERT INTO reputation_profiles (username, {count_col}, last_updated) 
+                    VALUES ($1, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT (username) DO UPDATE 
+                    SET {count_col} = reputation_profiles.{count_col} + 1,
+                        last_updated = CURRENT_TIMESTAMP
+                """, nominee_username)
+            except Exception as e:
+                logger.error(f"投票操作失败: {e}")
+                await query.answer("❌ 操作失败，可能数据库结构需要更新", show_alert=True)
+                return
         
         # 发送警示通知
         asyncio.create_task(send_vote_notifications(context.bot, nominee_username, nominator_id, vote_type, tag_name))
