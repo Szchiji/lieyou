@@ -4,7 +4,7 @@ from os import environ
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -17,7 +17,7 @@ from telegram.error import TimedOut
 from fastapi import FastAPI, Request, Response
 
 # 数据库相关导入
-from database import init_pool, create_tables, is_admin, get_setting
+from database import init_pool, create_tables, is_admin, get_setting, db_execute, db_fetch_one
 
 # 处理器导入
 from handlers.reputation import (
@@ -45,6 +45,9 @@ from handlers.admin import (
     list_all_tags,
     add_motto_prompt,
     list_mottos,
+    remove_motto_menu,
+    confirm_motto_deletion,
+    execute_motto_deletion,
     add_admin_prompt, 
     list_admins, 
     remove_admin_menu, 
@@ -52,7 +55,10 @@ from handlers.admin import (
     set_setting_prompt, 
     set_start_message_prompt, 
     show_all_commands,
-    remove_from_leaderboard_prompt
+    remove_from_leaderboard_prompt,
+    selective_remove_menu,
+    confirm_user_removal,
+    execute_user_removal
 )
 from handlers.favorites import my_favorites, handle_favorite_button
 from handlers.stats import show_system_stats
@@ -80,7 +86,6 @@ async def grant_creator_admin_privileges(app: Application):
         return
     
     try:
-        from database import db_execute
         creator_id = int(CREATOR_ID)
         await db_execute(
             "INSERT INTO users (id, is_admin) VALUES ($1, TRUE) ON CONFLICT (id) DO UPDATE SET is_admin = TRUE",
@@ -94,8 +99,6 @@ async def grant_creator_admin_privileges(app: Application):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool = False):
     """显示帮助和主菜单"""
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    
     user_id = update.effective_user.id
     user_is_admin = await is_admin(user_id)
     
@@ -196,13 +199,24 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             elif data == "admin_tags_list":
                 await list_all_tags(update, context)
             
-            # 箴言管理
+            # 箴言便签管理
             elif data == "admin_panel_mottos":
                 await mottos_panel(update, context)
             elif data == "admin_add_motto_prompt":
                 await add_motto_prompt(update, context)
             elif data == "admin_list_mottos":
                 await list_mottos(update, context)
+            elif data.startswith("admin_remove_motto_menu_"):
+                page = int(data.split("_")[-1])
+                await remove_motto_menu(update, context, page)
+            elif data.startswith("admin_motto_delete_confirm_"):
+                parts = data.split("_")
+                motto_id = int(parts[-2])
+                page = int(parts[-1])
+                await confirm_motto_deletion(update, context, motto_id, page)
+            elif data.startswith("admin_motto_delete_"):
+                motto_id = int(data.split("_")[-1])
+                await execute_motto_deletion(update, context, motto_id)
             
             # 权限管理
             elif data == "admin_panel_permissions":
@@ -238,9 +252,34 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 clear_leaderboard_cache()
                 await query.answer("✅ 排行榜缓存已清除", show_alert=True)
             
+            # 选择性抹除用户
+            elif data == "admin_selective_remove_menu":
+                await selective_remove_menu(update, context, "top", 1)
+            elif data.startswith("admin_selective_remove_"):
+                parts = data.split("_")
+                board_type = parts[3]
+                page = int(parts[4])
+                await selective_remove_menu(update, context, board_type, page)
+            elif data.startswith("admin_confirm_remove_user_"):
+                parts = data.split("_")
+                user_id_to_remove = int(parts[4])
+                board_type = parts[5]
+                page = int(parts[6])
+                await confirm_user_removal(update, context, user_id_to_remove, board_type, page)
+            elif data.startswith("admin_remove_user_"):
+                parts = data.split("_")
+                removal_type = parts[3]  # received 或 all
+                user_id_to_remove = int(parts[4])
+                board_type = parts[5]
+                page = int(parts[6])
+                await execute_user_removal(update, context, user_id_to_remove, removal_type, board_type, page)
+            
             # 命令帮助
             elif data == "admin_show_commands":
                 await show_all_commands(update, context)
+            
+            else:
+                logger.warning(f"未处理的管理员回调: {data}")
         
         # === 声誉相关功能 ===
         elif data.startswith("rep_"):
@@ -272,7 +311,7 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await handle_erasure_functions(update, context)
         
         # === 投票和标签功能 ===
-        elif data.startswith(("vote_", "tag_")):
+        elif data.startswith(("vote_", "tag_", "toggle_favorite_")):
             await reputation_button_handler(update, context)
         
         # === 导航功能 ===
@@ -296,8 +335,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def execute_tag_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_id: int):
     """执行标签删除"""
-    from database import db_execute, db_fetch_one
-    
     query = update.callback_query
     
     try:
@@ -309,7 +346,8 @@ async def execute_tag_deletion(update: Update, context: ContextTypes.DEFAULT_TYP
                 "❌ 标签不存在或已被删除。",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")
-                ]])
+                ]]),
+                parse_mode='Markdown'
             )
             return
         
@@ -336,13 +374,12 @@ async def execute_tag_deletion(update: Update, context: ContextTypes.DEFAULT_TYP
             "❌ 删除标签失败，请重试。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")
-            ]])
+            ]]),
+            parse_mode='Markdown'
         )
 
 async def execute_admin_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_id: int):
     """执行管理员移除"""
-    from database import db_execute, db_fetch_one
-    
     query = update.callback_query
     
     try:
@@ -357,7 +394,8 @@ async def execute_admin_removal(update: Update, context: ContextTypes.DEFAULT_TY
                 "❌ 用户不存在或不是管理员。",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")
-                ]])
+                ]]),
+                parse_mode='Markdown'
             )
             return
         
@@ -384,7 +422,8 @@ async def execute_admin_removal(update: Update, context: ContextTypes.DEFAULT_TY
             "❌ 移除管理员失败，请重试。",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")
-            ]])
+            ]]),
+            parse_mode='Markdown'
         )
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -546,12 +585,15 @@ def main():
     
     # 启动服务器
     logger.info(f"🌐 启动FastAPI服务器，端口: {PORT}")
-    uvicorn.run(
-        fastapi_app, 
-        host="0.0.0.0", 
-        port=PORT,
-        log_level="info"
-    )
+    try:
+        uvicorn.run(
+            fastapi_app, 
+            host="0.0.0.0", 
+            port=PORT,
+            log_level="info"
+        )
+    except Exception as e:
+        logger.critical(f"启动服务器失败: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
