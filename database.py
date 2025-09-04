@@ -1,236 +1,122 @@
-import asyncpg
+import asyncio
 import logging
 from os import environ
-from datetime import datetime
+from contextlib import asynccontextmanager
+
+import asyncpg
 
 logger = logging.getLogger(__name__)
-pool = None
+DB_URL = environ.get("DATABASE_URL")
+_pool = None
 
 async def init_pool():
-    global pool
-    if pool: return
-    pool = await asyncpg.create_pool(
-        dsn=environ.get("DATABASE_URL"),
-        min_size=1,
-        max_size=10,
-        command_timeout=60,
-    )
-    logger.info("✅ 数据库连接池已成功初始化。")
+    global _pool
+    try:
+        _pool = await asyncpg.create_pool(DB_URL)
+        logger.info("✅ 数据库连接池初始化成功")
+        return _pool
+    except Exception as e:
+        logger.critical(f"❌ 初始化数据库连接池失败: {e}", exc_info=True)
+        raise
 
-async def create_tables():
-    logger.info("✅ (启动流程) 正在检查并创建/迁移所有数据表...")
-    await init_pool()
-    async with pool.acquire() as conn:
-        # users
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY,
-                is_admin BOOLEAN DEFAULT FALSE,
-                username TEXT,
-                first_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'users' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS reputation_profiles (
-                username TEXT PRIMARY KEY,
-                recommend_count INTEGER DEFAULT 0,
-                block_count INTEGER DEFAULT 0,
-                first_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE reputation_profiles ADD COLUMN IF NOT EXISTS first_seen TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            await conn.execute("ALTER TABLE reputation_profiles ADD COLUMN IF NOT EXISTS last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'reputation_profiles' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS tags (
-                id SERIAL PRIMARY KEY,
-                tag_name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (tag_name, type)
-            );
-        """)
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'tags' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
-    
-    async with pool.acquire() as conn:
-        # 检查votes表的结构并添加必要的字段
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS votes (
-                id SERIAL PRIMARY KEY,
-                nominator_id BIGINT NOT NULL,
-                nominee_username TEXT NOT NULL,
-                vote_type TEXT NOT NULL,
-                tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        
-        # 确保tag_id可以为NULL (如果表已经存在)
-        try:
-            await conn.execute("ALTER TABLE votes ALTER COLUMN tag_id DROP NOT NULL;")
-        except Exception as e:
-            # 可能已经是NULL或者列不存在
-            logger.debug(f"设置tag_id为可NULL列时遇到异常: {e}")
-            
-        # 确保vote_type和created_at列存在
-        try:
-            await conn.execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS vote_type TEXT NOT NULL DEFAULT 'recommend';")
-            await conn.execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'votes' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败: {e}")
-    
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS favorites (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                favorite_username TEXT NOT NULL,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (user_id, favorite_username)
-            );
-        """)
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE favorites ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'favorites' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-    async with pool.acquire() as conn:
-        try:
-            await conn.execute("ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-            logger.info("✅ (数据库迁移) 'settings' 表字段检查完成。")
-        except Exception as e:
-            logger.warning(f"(数据库迁移) 添加字段失败，可能已存在: {e}")
-    
-    # 初始化默认设置
-    await initialize_default_settings()
-    logger.info("✅ (启动流程) 所有数据表检查/创建/迁移完毕。")
-
-async def initialize_default_settings():
-    """初始化默认系统设置"""
-    default_settings = {
-        'leaderboard_cache_ttl': '300',  # 5分钟缓存
-    }
-    
-    async with db_transaction() as conn:
-        for key, value in default_settings.items():
-            await conn.execute("""
-                INSERT INTO settings (key, value) 
-                VALUES ($1, $2)
-                ON CONFLICT (key) DO NOTHING
-            """, key, value)
-
-# 数据库事务上下文管理器
-from contextlib import asynccontextmanager
 @asynccontextmanager
 async def db_transaction():
-    if not pool:
+    if not _pool:
         await init_pool()
-    async with pool.acquire() as conn:
+    async with _pool.acquire() as conn:
         async with conn.transaction():
             yield conn
 
-async def update_user_activity(user_id: int, username: str = None):
-    """更新用户活动时间"""
-    try:
-        async with db_transaction() as conn:
-            if username:
-                await conn.execute("""
-                    INSERT INTO users (id, username, last_active) 
-                    VALUES ($1, $2, CURRENT_TIMESTAMP) 
-                    ON CONFLICT (id) DO UPDATE 
-                    SET username = $2, last_active = CURRENT_TIMESTAMP
-                """, user_id, username)
-            else:
-                await conn.execute("""
-                    UPDATE users SET last_active = CURRENT_TIMESTAMP 
-                    WHERE id = $1
-                """, user_id)
-    except Exception as e:
-        logger.error(f"更新用户活动失败: {e}", exc_info=True)
+async def db_fetch_one(query, *args):
+    if not _pool:
+        await init_pool()
+    async with _pool.acquire() as conn:
+        return await conn.fetchrow(query, *args)
 
-async def get_system_stats():
-    """获取系统统计数据"""
+async def db_fetch_all(query, *args):
+    if not _pool:
+        await init_pool()
+    async with _pool.acquire() as conn:
+        return await conn.fetch(query, *args)
+
+async def db_execute(query, *args):
+    if not _pool:
+        await init_pool()
+    async with _pool.acquire() as conn:
+        return await conn.execute(query, *args)
+
+async def create_tables():
     async with db_transaction() as conn:
-        stats = {}
+        # 用户表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            is_admin BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        # 声誉标签表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS tags (
+            id SERIAL PRIMARY KEY,
+            tag_type TEXT NOT NULL,  -- 'recommend' 或 'block' 或 'quote'
+            content TEXT NOT NULL,
+            created_by BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (created_by) REFERENCES users(id)
+        )
+        ''')
+
+        # 声誉评价表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS reputation (
+            id SERIAL PRIMARY KEY,
+            target_id BIGINT NOT NULL,
+            voter_id BIGINT NOT NULL,
+            tag_id INTEGER NOT NULL,
+            is_positive BOOLEAN NOT NULL,  -- TRUE为正面评价，FALSE为负面评价
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (target_id) REFERENCES users(id),
+            FOREIGN KEY (voter_id) REFERENCES users(id),
+            FOREIGN KEY (tag_id) REFERENCES tags(id),
+            CONSTRAINT unique_vote UNIQUE (target_id, voter_id, tag_id)
+        )
+        ''')
+
+        # 收藏表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS favorites (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            target_id BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (target_id) REFERENCES users(id),
+            CONSTRAINT unique_favorite UNIQUE (user_id, target_id)
+        )
+        ''')
         
-        # 总用户数
-        stats['total_users'] = await conn.fetchval("SELECT COUNT(*) FROM users")
+        # 系统设置表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         
-        # 总档案数
-        stats['total_profiles'] = await conn.fetchval("SELECT COUNT(*) FROM reputation_profiles")
-        
-        # 总投票数
-        stats['total_votes'] = await conn.fetchval("SELECT COUNT(*) FROM votes")
-        
-        # 标签数量
-        stats['recommend_tags'] = await conn.fetchval("SELECT COUNT(*) FROM tags WHERE type = 'recommend'")
-        stats['block_tags'] = await conn.fetchval("SELECT COUNT(*) FROM tags WHERE type = 'block'")
-        
-        # 今日活跃统计
-        today = datetime.now().date()
-        
-        # 检查votes表是否有created_at列
-        has_created_at = False
-        try:
-            # 尝试查询列信息
-            column_info = await conn.fetch("""
-                SELECT column_name FROM information_schema.columns 
-                WHERE table_name = 'votes' AND column_name = 'created_at'
-            """)
-            has_created_at = len(column_info) > 0
-        except Exception as e:
-            logger.error(f"检查votes表结构失败: {e}")
-        
-        # 根据是否有created_at列来调整查询
-        if has_created_at:
-            stats['today_votes'] = await conn.fetchval(
-                "SELECT COUNT(*) FROM votes WHERE DATE(created_at) = $1", 
-                today
-            )
-        else:
-            # 如果没有created_at列，只返回总票数
-            stats['today_votes'] = 0
-            logger.warning("votes表缺少created_at列，无法计算今日票数")
-        
-        # 最活跃用户
-        most_active = await conn.fetch("""
-            SELECT nominee_username, COUNT(*) as vote_count 
-            FROM votes 
-            GROUP BY nominee_username 
-            ORDER BY vote_count DESC 
-            LIMIT 1
-        """)
-        stats['most_active_user'] = most_active[0]['nominee_username'] if most_active else None
-        
-        return stats
+        # 箴言引用统计表
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS quote_stats (
+            quote_id INTEGER PRIMARY KEY,
+            usage_count INTEGER DEFAULT 0,
+            last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (quote_id) REFERENCES tags(id)
+        )
+        ''')
+
+        logger.info("✅ 数据库表结构初始化完成")
