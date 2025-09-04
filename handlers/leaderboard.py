@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from database import db_fetch_all, db_fetch_one, db_fetchval, update_user_activity
+from database import db_fetch_all, db_fetch_one, db_fetchval, update_user_activity, get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -35,24 +35,28 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
         return _leaderboard_cache[cache_key]
     
     # 获取设置
-    min_votes = int(await db_fetchval("SELECT value FROM settings WHERE key = 'min_votes_for_leaderboard'") or "3")
-    page_size = int(await db_fetchval("SELECT value FROM settings WHERE key = 'leaderboard_size'") or "10")
+    try:
+        min_votes = int(await get_setting('min_votes_for_leaderboard') or "3")
+        page_size = int(await get_setting('leaderboard_size') or "10")
+    except (ValueError, TypeError):
+        min_votes = 3
+        page_size = 10
     
     offset = (page - 1) * page_size
     
-    # 构建查询
+    # 构建查询 - 修复字段名兼容性
     base_query = """
         WITH user_stats AS (
             SELECT 
                 u.id,
                 u.username,
-                u.first_name,
+                COALESCE(u.first_name, u.name) as display_name,
                 COUNT(*) as total_votes,
                 COUNT(*) FILTER (WHERE r.is_positive = TRUE) as positive_votes,
                 COUNT(*) FILTER (WHERE r.is_positive = FALSE) as negative_votes,
                 COUNT(DISTINCT r.voter_id) as unique_voters
             FROM users u
-            JOIN reputations r ON u.id = r.target_id
+            JOIN reputations r ON u.id = COALESCE(r.target_id, r.target_user_id)
     """
     
     params = [min_votes, page_size, offset]
@@ -63,11 +67,11 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
         params.append(tag_filter)
     
     base_query += """
-            GROUP BY u.id, u.username, u.first_name
+            GROUP BY u.id, u.username, u.first_name, u.name
             HAVING COUNT(*) >= $1
         )
         SELECT 
-            id, username, first_name, total_votes, positive_votes, negative_votes, unique_voters,
+            id, username, display_name, total_votes, positive_votes, negative_votes, unique_voters,
             CASE 
                 WHEN total_votes > 0 THEN ROUND((positive_votes::float / total_votes) * 100)
                 ELSE 0
@@ -83,38 +87,44 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
     
     base_query += " LIMIT $2 OFFSET $3"
     
-    # 执行查询
-    results = await db_fetch_all(base_query, *params)
-    
-    # 获取总数
-    count_query = """
-        SELECT COUNT(*) FROM (
-            SELECT r.target_id
-            FROM reputations r
-    """
-    
-    count_params = [min_votes]
-    if tag_filter:
-        count_query += " WHERE $2 = ANY(r.tag_ids)"
-        count_params.append(tag_filter)
-    
-    count_query += """
-            GROUP BY r.target_id
-            HAVING COUNT(*) >= $1
-        ) as filtered
-    """
-    
-    total_count = await db_fetchval(count_query, *count_params)
-    
-    # 转换结果
-    leaderboard_data = [dict(row) for row in results]
-    
-    # 缓存结果
-    result = (leaderboard_data, total_count or 0)
-    _leaderboard_cache[cache_key] = result
-    _cache_expiry[cache_key] = now + _cache_duration
-    
-    return result
+    try:
+        # 执行查询
+        results = await db_fetch_all(base_query, *params)
+        
+        # 获取总数 - 修复字段名兼容性
+        count_query = """
+            SELECT COUNT(*) FROM (
+                SELECT COALESCE(r.target_id, r.target_user_id) as target_id
+                FROM reputations r
+        """
+        
+        count_params = [min_votes]
+        if tag_filter:
+            count_query += " WHERE $2 = ANY(r.tag_ids)"
+            count_params.append(tag_filter)
+        
+        count_query += """
+                GROUP BY COALESCE(r.target_id, r.target_user_id)
+                HAVING COUNT(*) >= $1
+            ) as filtered
+        """
+        
+        total_count = await db_fetchval(count_query, *count_params) or 0
+        
+        # 转换结果
+        leaderboard_data = [dict(row) for row in results]
+        
+        # 缓存结果
+        result = (leaderboard_data, total_count)
+        _leaderboard_cache[cache_key] = result
+        _cache_expiry[cache_key] = now + _cache_duration
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"获取排行榜数据失败: {e}", exc_info=True)
+        # 返回空结果
+        return ([], 0)
 
 async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示排行榜"""
@@ -126,16 +136,30 @@ async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 解析回调数据: leaderboard_TYPE_ACTION_PARAM_PAGE
     parts = data.split("_")
-    board_type = parts[1]  # top 或 bottom
-    action = parts[2]  # tagselect 或 display
     
-    if action == "tagselect":
-        page = int(parts[3]) if len(parts) > 3 else 1
-        await show_tag_selection(update, context, board_type, page)
-    elif action == "display":
-        tag_id = int(parts[3]) if parts[3] != "all" else None
-        page = int(parts[4]) if len(parts) > 4 else 1
-        await display_leaderboard(update, context, board_type, tag_id, page)
+    if len(parts) < 3:
+        logger.warning(f"排行榜回调数据格式错误: {data}")
+        return
+    
+    board_type = parts[1]  # top 或 bottom
+    action = parts[2]  # tagselect, all, tag
+    
+    try:
+        if action == "tagselect":
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await show_tag_selection(update, context, board_type, page)
+        elif action == "all":
+            page = int(parts[3]) if len(parts) > 3 else 1
+            await display_leaderboard(update, context, board_type, None, page)
+        elif action == "tag":
+            tag_id = int(parts[3])
+            page = int(parts[4]) if len(parts) > 4 else 1
+            await display_leaderboard(update, context, board_type, tag_id, page)
+        else:
+            logger.warning(f"未知的排行榜操作: {action}")
+            
+    except (ValueError, IndexError) as e:
+        logger.error(f"解析排行榜回调数据失败: {data}, 错误: {e}")
 
 async def show_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int = 1):
     """显示标签选择页面"""
@@ -145,39 +169,51 @@ async def show_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYPE,
     per_page = 8
     offset = (page - 1) * per_page
     
-    # 获取标签
-    tags = await db_fetch_all("""
-        SELECT id, name, type FROM tags
-        ORDER BY type = 'recommend' DESC, name
-        LIMIT $1 OFFSET $2
-    """, per_page, offset)
-    
-    total_tags = await db_fetchval("SELECT COUNT(*) FROM tags")
-    total_pages = (total_tags + per_page - 1) // per_page if total_tags > 0 else 1
+    try:
+        # 获取标签 - 修复字段名兼容性
+        tags = await db_fetch_all("""
+            SELECT id, COALESCE(name, tag_name) as name, COALESCE(type, tag_type) as type 
+            FROM tags
+            ORDER BY COALESCE(type, tag_type) = 'recommend' DESC, COALESCE(name, tag_name)
+            LIMIT $1 OFFSET $2
+        """, per_page, offset)
+        
+        total_tags = await db_fetchval("SELECT COUNT(*) FROM tags") or 0
+        total_pages = (total_tags + per_page - 1) // per_page if total_tags > 0 else 1
+        
+    except Exception as e:
+        logger.error(f"获取标签失败: {e}", exc_info=True)
+        # 如果获取标签失败，直接显示全部排行榜
+        await display_leaderboard(update, context, board_type, None, page)
+        return
     
     # 构建消息
     title = "🏆 英灵殿" if board_type == "top" else "☠️ 放逐深渊"
-    message = f"*{title}* - 选择标签分类:"
+    message = f"**{title}** - 选择标签分类\n\n"
+    message += "选择标签筛选排行榜，或查看全部："
     
     # 构建按钮
     keyboard = []
     
     # 全部选项
-    keyboard.append([InlineKeyboardButton("🌐 全部", callback_data=f"leaderboard_{board_type}_display_all_1")])
+    keyboard.append([InlineKeyboardButton("🌟 查看全部", callback_data=f"leaderboard_{board_type}_all_1")])
     
     # 标签按钮
-    for i in range(0, len(tags), 2):
-        row = []
-        for j in range(2):
-            if i + j < len(tags):
-                tag = tags[i + j]
-                emoji = "🏅" if tag['type'] == 'recommend' else "⚠️"
-                row.append(InlineKeyboardButton(
-                    f"{emoji} {tag['name']}", 
-                    callback_data=f"leaderboard_{board_type}_display_{tag['id']}_1"
-                ))
-        if row:
-            keyboard.append(row)
+    if tags:
+        for i in range(0, len(tags), 2):
+            row = []
+            for j in range(2):
+                if i + j < len(tags):
+                    tag = tags[i + j]
+                    emoji = "🏅" if tag['type'] == 'recommend' else "⚠️"
+                    row.append(InlineKeyboardButton(
+                        f"{emoji} {tag['name']}", 
+                        callback_data=f"leaderboard_{board_type}_tag_{tag['id']}_1"
+                    ))
+            if row:
+                keyboard.append(row)
+    else:
+        keyboard.append([InlineKeyboardButton("📝 暂无标签", callback_data="noop")])
     
     # 分页按钮
     if total_pages > 1:
@@ -189,105 +225,155 @@ async def show_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if nav_row:
             keyboard.append(nav_row)
     
-    # 返回按钮
+    # 切换排行榜和返回按钮
+    opposite_type = "bottom" if board_type == "top" else "top"
+    opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
+    keyboard.append([InlineKeyboardButton(f"🔄 切换到{opposite_title}", callback_data=f"leaderboard_{opposite_type}_tagselect_1")])
     keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
     
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    
+    try:
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        logger.error(f"编辑标签选择消息失败: {e}")
 
 async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, tag_id: Optional[int], page: int = 1):
     """显示排行榜内容"""
     query = update.callback_query
     await query.answer()
     
-    # 获取数据
-    leaderboard_data, total_count = await get_leaderboard_data(board_type, tag_id, page)
-    
-    # 获取标签名称
-    tag_name = None
-    if tag_id:
-        tag_info = await db_fetch_one("SELECT name, type FROM tags WHERE id = $1", tag_id)
-        if tag_info:
-            emoji = "🏅" if tag_info['type'] == 'recommend' else "⚠️"
-            tag_name = f"{emoji} {tag_info['name']}"
-    
-    # 构建消息
-    title = "🏆 英灵殿" if board_type == "top" else "☠️ 放逐深渊"
-    subtitle = f" - {tag_name}" if tag_name else ""
-    message = f"*{title}{subtitle}*\n\n"
-    
-    if not leaderboard_data:
-        message += "暂无符合条件的用户"
-    else:
-        page_size = int(await db_fetchval("SELECT value FROM settings WHERE key = 'leaderboard_size'") or "10")
-        start_rank = (page - 1) * page_size + 1
+    try:
+        # 获取数据
+        leaderboard_data, total_count = await get_leaderboard_data(board_type, tag_id, page)
         
-        for i, user in enumerate(leaderboard_data):
-            rank = start_rank + i
+        # 获取标签名称
+        tag_name = None
+        if tag_id:
+            try:
+                tag_info = await db_fetch_one("""
+                    SELECT COALESCE(name, tag_name) as name, COALESCE(type, tag_type) as type 
+                    FROM tags WHERE id = $1
+                """, tag_id)
+                if tag_info:
+                    emoji = "🏅" if tag_info['type'] == 'recommend' else "⚠️"
+                    tag_name = f"{emoji} {tag_info['name']}"
+            except Exception as e:
+                logger.error(f"获取标签信息失败: {e}")
+        
+        # 构建消息
+        title = "🏆 英灵殿" if board_type == "top" else "☠️ 放逐深渊"
+        subtitle = f" - {tag_name}" if tag_name else ""
+        message = f"**{title}{subtitle}**\n\n"
+        
+        if not leaderboard_data:
+            message += "🌟 这里还很空旷，快来成为第一个上榜的人吧！"
+        else:
+            try:
+                page_size = int(await get_setting('leaderboard_size') or "10")
+            except (ValueError, TypeError):
+                page_size = 10
             
-            # 用户显示名（使用标准字体）
-            display_name = user['first_name'] or f"@{user['username']}" if user['username'] else f"用户{user['id']}"
+            start_rank = (page - 1) * page_size + 1
             
-            # 排名图标
-            if board_type == "top" and rank <= 3:
-                rank_icons = ["🥇", "🥈", "🥉"]
-                rank_icon = rank_icons[rank-1] + " "
-            elif board_type == "bottom" and rank <= 3:
-                rank_icon = "💀 "
-            else:
-                rank_icon = ""
-            
-            # 声誉描述
-            score = user['reputation_score']
-            total_votes = user['total_votes']
-            
-            if board_type == "top":
+            for i, user in enumerate(leaderboard_data):
+                rank = start_rank + i
+                
+                # 用户显示名 - 兼容新旧字段名
+                display_name = user.get('display_name') or user.get('first_name') or f"@{user['username']}" if user.get('username') else f"用户{user['id']}"
+                
+                # 截断过长的名称
+                if len(display_name) > 12:
+                    display_name = display_name[:12] + "..."
+                
+                # 排名图标
+                if board_type == "top":
+                    if rank == 1:
+                        rank_icon = "🥇"
+                    elif rank == 2:
+                        rank_icon = "🥈"
+                    elif rank == 3:
+                        rank_icon = "🥉"
+                    else:
+                        rank_icon = f"{rank}."
+                else:
+                    rank_icon = f"{rank}."
+                
+                # 声誉等级
+                score = user.get('reputation_score', 0)
+                total_votes = user.get('total_votes', 0)
+                positive_votes = user.get('positive_votes', 0)
+                negative_votes = user.get('negative_votes', 0)
+                
+                # 等级图标
                 if score >= 90:
-                    score_text = f"✨ {score}%"
+                    level_icon = "⭐"
                 elif score >= 75:
-                    score_text = f"🌟 {score}%"
+                    level_icon = "✅"
+                elif score >= 60:
+                    level_icon = "⚖️"
+                elif score >= 40:
+                    level_icon = "⚠️"
                 else:
-                    score_text = f"⭐ {score}%"
-            else:
-                if score <= 10:
-                    score_text = f"☠️ {score}%"
-                elif score <= 25:
-                    score_text = f"❌ {score}%"
-                else:
-                    score_text = f"⚠️ {score}%"
+                    level_icon = "💀"
+                
+                message += f"{rank_icon} {level_icon} **{display_name}**\n"
+                message += f"   📊 {score}% ({positive_votes}👍/{negative_votes}👎)\n\n"
+        
+        # 分页信息
+        try:
+            page_size = int(await get_setting('leaderboard_size') or "10")
+        except (ValueError, TypeError):
+            page_size = 10
+        
+        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+        
+        if total_pages > 1:
+            message += f"第 {page}/{total_pages} 页 · 共 {total_count} 人"
+        
+        # 构建按钮
+        keyboard = []
+        
+        # 分页按钮
+        if total_pages > 1:
+            nav_row = []
+            if page > 1:
+                callback_prefix = f"leaderboard_{board_type}_tag_{tag_id}" if tag_id else f"leaderboard_{board_type}_all"
+                nav_row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"{callback_prefix}_{page-1}"))
+            if page < total_pages:
+                callback_prefix = f"leaderboard_{board_type}_tag_{tag_id}" if tag_id else f"leaderboard_{board_type}_all"
+                nav_row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"{callback_prefix}_{page+1}"))
             
-            message += f"{rank_icon}{rank}. {display_name} - {score_text} ({total_votes}票)\n"
-    
-    # 分页信息
-    page_size = int(await db_fetchval("SELECT value FROM settings WHERE key = 'leaderboard_size'") or "10")
-    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-    
-    if total_pages > 1:
-        message += f"\n第 {page}/{total_pages} 页"
-    
-    # 构建按钮
-    keyboard = []
-    
-    # 分页按钮
-    if total_pages > 1:
-        nav_row = []
-        if page > 1:
-            nav_row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"leaderboard_{board_type}_display_{tag_id or 'all'}_{page-1}"))
-        if page < total_pages:
-            nav_row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"leaderboard_{board_type}_display_{tag_id or 'all'}_{page+1}"))
-        if nav_row:
-            keyboard.append(nav_row)
-    
-    # 切换排行榜按钮
-    opposite_type = "bottom" if board_type == "top" else "top"
-    opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
-    keyboard.append([InlineKeyboardButton(f"查看{opposite_title}", callback_data=f"leaderboard_{opposite_type}_tagselect_1")])
-    
-    # 功能按钮
-    keyboard.append([
-        InlineKeyboardButton("🔍 选择标签", callback_data=f"leaderboard_{board_type}_tagselect_1"),
-        InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")
-    ])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            if nav_row:
+                keyboard.append(nav_row)
+        
+        # 功能按钮
+        function_buttons = []
+        if tag_id:
+            function_buttons.append(InlineKeyboardButton("🌟 查看全部", callback_data=f"leaderboard_{board_type}_all_{page}"))
+        function_buttons.append(InlineKeyboardButton("🏷️ 标签筛选", callback_data=f"leaderboard_{board_type}_tagselect_{page}"))
+        keyboard.append(function_buttons)
+        
+        # 切换排行榜按钮
+        opposite_type = "bottom" if board_type == "top" else "top"
+        opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
+        keyboard.append([InlineKeyboardButton(f"🔄 切换到{opposite_title}", callback_data=f"leaderboard_{opposite_type}_tagselect_1")])
+        
+        # 返回按钮
+        keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        
+    except Exception as e:
+        logger.error(f"显示排行榜失败: {e}", exc_info=True)
+        
+        # 显示错误消息
+        error_message = "❌ 获取排行榜数据时出错，请稍后重试。"
+        error_keyboard = [[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]]
+        error_reply_markup = InlineKeyboardMarkup(error_keyboard)
+        
+        try:
+            await query.edit_message_text(error_message, reply_markup=error_reply_markup)
+        except Exception as edit_error:
+            logger.error(f"显示错误消息失败: {edit_error}")
