@@ -27,7 +27,10 @@ from handlers.reputation import (
     show_reputation_details, 
     show_reputation_voters,
     show_voters_menu, 
-    handle_username_query
+    handle_username_query,
+    handle_vote_comment,
+    handle_vote_submit,
+    handle_comment_input
 )
 from handlers.leaderboard import show_leaderboard, clear_leaderboard_cache
 from handlers.admin import (
@@ -312,7 +315,12 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         # === 投票和标签功能 ===
         elif data.startswith(("vote_", "tag_", "toggle_favorite_")):
-            await reputation_button_handler(update, context)
+            if data.startswith("vote_comment_"):
+                await handle_vote_comment(update, context)
+            elif data.startswith("vote_submit_"):
+                await handle_vote_submit(update, context)
+            else:
+                await reputation_button_handler(update, context)
         
         # === 导航功能 ===
         elif data == "back_to_help":
@@ -430,9 +438,11 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消当前操作"""
     if 'next_action' in context.user_data:
         del context.user_data['next_action']
-        await update.message.reply_text("✅ 操作已取消")
-    else:
-        await update.message.reply_text("ℹ️ 当前没有进行中的操作")
+    if 'comment_input' in context.user_data:
+        del context.user_data['comment_input']
+    if 'current_vote' in context.user_data:
+        del context.user_data['current_vote']
+    await update.message.reply_text("✅ 操作已取消")
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示所有命令（仅管理员）"""
@@ -441,6 +451,15 @@ async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_all_commands(update, context, from_command=True)
     else:
         await update.message.reply_text("❌ 此命令仅管理员可用")
+
+async def private_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理私聊文本消息"""
+    # 首先检查是否是评论输入
+    if await handle_comment_input(update, context):
+        return
+    
+    # 然后检查是否是管理员输入
+    await process_admin_input(update, context)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理错误"""
@@ -462,10 +481,10 @@ ptb_app.add_handler(CommandHandler("commands", commands_command))
 # 添加回调查询处理器
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 
-# 添加管理员文本输入处理（私聊）
+# 添加私聊文本处理器（包括管理员输入和评论输入）
 ptb_app.add_handler(MessageHandler(
     filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-    process_admin_input
+    private_text_handler
 ))
 
 # 添加群聊中的@用户处理
@@ -541,6 +560,12 @@ def main():
             "bot_username": ptb_app.bot.username if ptb_app.bot else None
         }
     
+    @fastapi_app.get("/health", include_in_schema=False)
+    async def detailed_health():
+        """详细健康检查"""
+        try:
+            bot_info = await ptb_app.bot.get_me() if pt# 接上面的代码
+
     @fastapi_app.get("/health", include_in_schema=False)
     async def detailed_health():
         """详细健康检查"""
