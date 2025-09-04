@@ -120,7 +120,6 @@ async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode=ParseMode.MARKDOWN
     )
-# 接上面的 handlers/admin.py 内容
 
 async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_type: str):
     """提示添加标签"""
@@ -562,300 +561,6 @@ async def execute_motto_deletion(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode=ParseMode.MARKDOWN
         )
 
-# === 排行榜管理增强 - 选择性抹除用户 ===
-
-async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """排行榜管理面板"""
-    user_id = update.effective_user.id
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 权限不足", show_alert=True)
-        return
-    
-    await update.callback_query.answer()
-    
-    # 获取排行榜统计
-    total_users = await db_fetchval("""
-        SELECT COUNT(DISTINCT target_id) 
-        FROM reputations 
-        WHERE target_id IN (
-            SELECT target_id FROM reputations 
-            GROUP BY target_id 
-            HAVING COUNT(*) >= 3
-        )
-    """) or 0
-    
-    message = "🏆 **排行榜管理**\n\n"
-    message += f"📊 **当前统计**:\n"
-    message += f"• 排行榜用户: {total_users} 人\n\n"
-    message += "选择操作："
-    
-    keyboard = [
-        [InlineKeyboardButton("🎯 选择性抹除用户", callback_data="admin_selective_remove_menu")],
-        [InlineKeyboardButton("❌ 批量移除用户", callback_data="admin_leaderboard_remove_prompt")],
-        [InlineKeyboardButton("🔄 清除排行榜缓存", callback_data="admin_leaderboard_clear_cache")],
-        [InlineKeyboardButton("📊 排行榜统计", callback_data="admin_leaderboard_stats")],
-        [InlineKeyboardButton("🔙 返回", callback_data="admin_settings_menu")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def selective_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str = "top", page: int = 1):
-    """选择性抹除菜单"""
-    user_id = update.effective_user.id
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 权限不足", show_alert=True)
-        return
-    
-    await update.callback_query.answer()
-    
-    # 获取排行榜用户（简化版）
-    per_page = 8
-    offset = (page - 1) * per_page
-    
-    if board_type == "top":
-        users = await db_fetch_all("""
-            SELECT 
-                u.id, u.username, u.first_name,
-                COUNT(*) as total_votes,
-                ROUND((COUNT(*) FILTER (WHERE r.is_positive = TRUE)::float / COUNT(*)) * 100) as score
-            FROM users u
-            JOIN reputations r ON u.id = r.target_id
-            GROUP BY u.id, u.username, u.first_name
-            HAVING COUNT(*) >= 3
-            ORDER BY score DESC, total_votes DESC
-            LIMIT $1 OFFSET $2
-        """, per_page, offset)
-        title = "🏆 英灵殿"
-    else:
-        users = await db_fetch_all("""
-            SELECT 
-                u.id, u.username, u.first_name,
-                COUNT(*) as total_votes,
-                ROUND((COUNT(*) FILTER (WHERE r.is_positive = TRUE)::float / COUNT(*)) * 100) as score
-            FROM users u
-            JOIN reputations r ON u.id = r.target_id
-            GROUP BY u.id, u.username, u.first_name
-            HAVING COUNT(*) >= 3
-            ORDER BY score ASC, total_votes DESC
-            LIMIT $1 OFFSET $2
-        """, per_page, offset)
-        title = "☠️ 放逐深渊"
-    
-    total_count = await db_fetchval("""
-        SELECT COUNT(*) FROM (
-            SELECT r.target_id
-            FROM reputations r
-            GROUP BY r.target_id
-            HAVING COUNT(*) >= 3
-        ) as filtered
-    """)
-    
-    total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
-    
-    message = f"🎯 **选择性抹除 - {title}**\n\n"
-    message += "选择要从排行榜中移除的用户："
-    
-    keyboard = []
-    
-    if not users:
-        message += "\n\n暂无用户。"
-    else:
-        # 用户按钮
-        for user in users:
-            name = user['first_name'] or user['username'] or f"用户{user['id']}"
-            score_text = f"{user['score']}% ({user['total_votes']}票)"
-            keyboard.append([InlineKeyboardButton(
-                f"{name} - {score_text}",
-                callback_data=f"admin_confirm_remove_user_{user['id']}_{board_type}_{page}"
-            )])
-    
-    # 切换排行榜按钮
-    nav_buttons = []
-    opposite_type = "bottom" if board_type == "top" else "top"
-    opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
-    nav_buttons.append(InlineKeyboardButton(f"切换到{opposite_title}", callback_data=f"admin_selective_remove_{opposite_type}_1"))
-    
-    # 分页按钮
-    if total_pages > 1:
-        if page > 1:
-            nav_buttons.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"admin_selective_remove_{board_type}_{page-1}"))
-        if page < total_pages:
-            nav_buttons.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"admin_selective_remove_{board_type}_{page+1}"))
-    
-    if nav_buttons:
-        # 分成两行，切换按钮单独一行
-        keyboard.append([nav_buttons[0]])  # 切换按钮
-        if len(nav_buttons) > 1:
-            keyboard.append(nav_buttons[1:])  # 分页按钮
-    
-    # 返回按钮
-    keyboard.append([InlineKeyboardButton("🔙 返回排行榜管理", callback_data="admin_leaderboard_panel")])
-    
-    if total_pages > 1:
-        message += f"\n\n第 {page}/{total_pages} 页"
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def confirm_user_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, board_type: str, page: int):
-    """确认移除用户"""
-    query = update.callback_query
-    admin_id = update.effective_user.id
-    
-    if not await is_admin(admin_id):
-        await query.answer("❌ 权限不足", show_alert=True)
-        return
-    
-    await query.answer()
-    
-    # 获取用户信息和统计
-    user_info = await db_fetch_one("""
-        SELECT 
-            u.username, u.first_name,
-            COUNT(r1.*) as received_votes,
-            COUNT(r2.*) as given_votes,
-            COUNT(f.*) as favorites
-        FROM users u
-        LEFT JOIN reputations r1 ON u.id = r1.target_id
-        LEFT JOIN reputations r2 ON u.id = r2.voter_id
-        LEFT JOIN favorites f ON u.id = f.target_id
-        WHERE u.id = $1
-        GROUP BY u.id, u.username, u.first_name
-    """, user_id)
-    
-    if not user_info:
-        await query.edit_message_text(
-            "❌ 用户不存在。",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    name = user_info['first_name'] or user_info['username'] or f"用户{user_id}"
-    
-    message = f"⚠️ **确认移除用户**\n\n"
-    message += f"用户: **{name}**\n"
-    message += f"ID: `{user_id}`\n\n"
-    message += f"将要清除的数据:\n"
-    message += f"• 收到的评价: {user_info['received_votes']} 条\n"
-    message += f"• 给出的评价: {user_info['given_votes']} 条\n"
-    message += f"• 收藏记录: {user_info['favorites']} 条\n\n"
-    message += "选择清除范围:"
-    
-    keyboard = [
-        [InlineKeyboardButton("📥 只清除收到的评价", callback_data=f"admin_remove_user_received_{user_id}_{board_type}_{page}")],
-        [InlineKeyboardButton("🗑️ 清除所有相关数据", callback_data=f"admin_remove_user_all_{user_id}_{board_type}_{page}")],
-        [InlineKeyboardButton("❌ 取消", callback_data=f"admin_selective_remove_{board_type}_{page}")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        message,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def execute_user_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, removal_type: str, board_type: str, page: int):
-    """执行用户移除"""
-    query = update.callback_query
-    
-    try:
-        # 获取用户信息
-        user_info = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", user_id)
-        
-        if not user_info:
-            await query.edit_message_text(
-                "❌ 用户不存在或已被删除。",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
-                ]]),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-        
-        name = user_info['first_name'] or user_info['username'] or f"用户{user_id}"
-        
-        # 执行删除操作
-        async with db_transaction() as conn:
-            if removal_type == "received":
-                # 只删除收到的评价
-                received_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE target_id = $1", user_id)
-                fav_count = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE target_id = $1", user_id)
-                
-                await conn.execute("DELETE FROM reputations WHERE target_id = $1", user_id)
-                await conn.execute("DELETE FROM favorites WHERE target_id = $1", user_id)
-                
-                message = f"✅ **用户数据清除完成**\n\n"
-                message += f"用户: **{name}**\n"
-                message += f"已清除:\n"
-                message += f"• 收到的评价: {received_count} 条\n"
-                message += f"• 收藏记录: {fav_count} 条\n\n"
-                message += "该用户已从排行榜中移除。"
-                
-            elif removal_type == "all":
-                # 删除所有相关数据
-                received_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE target_id = $1", user_id)
-                given_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE voter_id = $1", user_id)
-                fav_given = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE user_id = $1", user_id)
-                fav_received = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE target_id = $1", user_id)
-                
-                await conn.execute("DELETE FROM reputations WHERE target_id = $1 OR voter_id = $1", user_id)
-                await conn.execute("DELETE FROM favorites WHERE user_id = $1 OR target_id = $1", user_id)
-                await conn.execute("DELETE FROM users WHERE id = $1", user_id)
-                
-                message = f"✅ **用户完全清除完成**\n\n"
-                message += f"用户: **{name}**\n"
-                message += f"已清除:\n"
-                message += f"• 收到的评价: {received_count} 条\n"
-                message += f"• 给出的评价: {given_count} 条\n"
-                message += f"• 收藏记录: {fav_given + fav_received} 条\n"
-                message += f"• 用户资料: 已删除\n\n"
-                message += "该用户已完全从系统中清除。"
-        
-        # 清除缓存
-        from handlers.leaderboard import clear_leaderboard_cache
-        clear_leaderboard_cache()
-        
-        keyboard = [
-            [InlineKeyboardButton("🎯 继续清理", callback_data=f"admin_selective_remove_{board_type}_{page}")],
-            [InlineKeyboardButton("🔙 返回排行榜管理", callback_data="admin_leaderboard_panel")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        logger.info(f"管理员 {update.effective_user.id} 清除了用户 {user_id} ({removal_type})")
-        
-    except Exception as e:
-        logger.error(f"清除用户失败: {e}", exc_info=True)
-        await query.edit_message_text(
-            "❌ 清除用户失败，请重试。",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
-            ]]),
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-# 接上面的 handlers/admin.py 内容
-
 # === 权限管理相关函数 ===
 
 async def permissions_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1175,6 +880,298 @@ async def set_setting_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
         'setting_key': setting_key
     }
 
+# === 排行榜管理增强 - 选择性抹除用户 ===
+
+async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """排行榜管理面板"""
+    user_id = update.effective_user.id
+    if not await is_admin(user_id):
+        await update.callback_query.answer("❌ 权限不足", show_alert=True)
+        return
+    
+    await update.callback_query.answer()
+    
+    # 获取排行榜统计
+    total_users = await db_fetchval("""
+        SELECT COUNT(DISTINCT target_id) 
+        FROM reputations 
+        WHERE target_id IN (
+            SELECT target_id FROM reputations 
+            GROUP BY target_id 
+            HAVING COUNT(*) >= 3
+        )
+    """) or 0
+    
+    message = "🏆 **排行榜管理**\n\n"
+    message += f"📊 **当前统计**:\n"
+    message += f"• 排行榜用户: {total_users} 人\n\n"
+    message += "选择操作："
+    
+    keyboard = [
+        [InlineKeyboardButton("🎯 选择性抹除用户", callback_data="admin_selective_remove_menu")],
+        [InlineKeyboardButton("❌ 批量移除用户", callback_data="admin_leaderboard_remove_prompt")],
+        [InlineKeyboardButton("🔄 清除排行榜缓存", callback_data="admin_leaderboard_clear_cache")],
+        [InlineKeyboardButton("📊 排行榜统计", callback_data="admin_leaderboard_stats")],
+        [InlineKeyboardButton("🔙 返回", callback_data="admin_settings_menu")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.callback_query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def selective_remove_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str = "top", page: int = 1):
+    """选择性抹除菜单"""
+    user_id = update.effective_user.id
+    if not await is_admin(user_id):
+        await update.callback_query.answer("❌ 权限不足", show_alert=True)
+        return
+    
+    await update.callback_query.answer()
+    
+    # 获取排行榜用户（简化版）
+    per_page = 8
+    offset = (page - 1) * per_page
+    
+    if board_type == "top":
+        users = await db_fetch_all("""
+            SELECT 
+                u.id, u.username, u.first_name,
+                COUNT(*) as total_votes,
+                ROUND((COUNT(*) FILTER (WHERE r.is_positive = TRUE)::float / COUNT(*)) * 100) as score
+            FROM users u
+            JOIN reputations r ON u.id = r.target_id
+            GROUP BY u.id, u.username, u.first_name
+            HAVING COUNT(*) >= 3
+            ORDER BY score DESC, total_votes DESC
+            LIMIT $1 OFFSET $2
+        """, per_page, offset)
+        title = "🏆 英灵殿"
+    else:
+        users = await db_fetch_all("""
+            SELECT 
+                u.id, u.username, u.first_name,
+                COUNT(*) as total_votes,
+                ROUND((COUNT(*) FILTER (WHERE r.is_positive = TRUE)::float / COUNT(*)) * 100) as score
+            FROM users u
+            JOIN reputations r ON u.id = r.target_id
+            GROUP BY u.id, u.username, u.first_name
+            HAVING COUNT(*) >= 3
+            ORDER BY score ASC, total_votes DESC
+            LIMIT $1 OFFSET $2
+        """, per_page, offset)
+        title = "☠️ 放逐深渊"
+    
+    total_count = await db_fetchval("""
+        SELECT COUNT(*) FROM (
+            SELECT r.target_id
+            FROM reputations r
+            GROUP BY r.target_id
+            HAVING COUNT(*) >= 3
+        ) as filtered
+    """)
+    
+    total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+    
+    message = f"🎯 **选择性抹除 - {title}**\n\n"
+    message += "选择要从排行榜中移除的用户："
+    
+    keyboard = []
+    
+    if not users:
+        message += "\n\n暂无用户。"
+    else:
+        # 用户按钮
+        for user in users:
+            name = user['first_name'] or user['username'] or f"用户{user['id']}"
+            score_text = f"{user['score']}% ({user['total_votes']}票)"
+            keyboard.append([InlineKeyboardButton(
+                f"{name} - {score_text}",
+                callback_data=f"admin_confirm_remove_user_{user['id']}_{board_type}_{page}"
+            )])
+    
+    # 切换排行榜按钮
+    nav_buttons = []
+    opposite_type = "bottom" if board_type == "top" else "top"
+    opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
+    nav_buttons.append(InlineKeyboardButton(f"切换到{opposite_title}", callback_data=f"admin_selective_remove_{opposite_type}_1"))
+    
+    # 分页按钮
+    if total_pages > 1:
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"admin_selective_remove_{board_type}_{page-1}"))
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"admin_selective_remove_{board_type}_{page+1}"))
+    
+    if nav_buttons:
+        # 分成两行，切换按钮单独一行
+        keyboard.append([nav_buttons[0]])  # 切换按钮
+        if len(nav_buttons) > 1:
+            keyboard.append(nav_buttons[1:])  # 分页按钮
+    
+    # 返回按钮
+    keyboard.append([InlineKeyboardButton("🔙 返回排行榜管理", callback_data="admin_leaderboard_panel")])
+    
+    if total_pages > 1:
+        message += f"\n\n第 {page}/{total_pages} 页"
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.callback_query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def confirm_user_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, board_type: str, page: int):
+    """确认移除用户"""
+    query = update.callback_query
+    admin_id = update.effective_user.id
+    
+    if not await is_admin(admin_id):
+        await query.answer("❌ 权限不足", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    # 获取用户信息和统计
+    user_info = await db_fetch_one("""
+        SELECT 
+            u.username, u.first_name,
+            COUNT(r1.*) as received_votes,
+            COUNT(r2.*) as given_votes,
+            COUNT(f.*) as favorites
+        FROM users u
+        LEFT JOIN reputations r1 ON u.id = r1.target_id
+        LEFT JOIN reputations r2 ON u.id = r2.voter_id
+        LEFT JOIN favorites f ON u.id = f.target_id
+        WHERE u.id = $1
+        GROUP BY u.id, u.username, u.first_name
+    """, user_id)
+    
+    if not user_info:
+        await query.edit_message_text(
+            "❌ 用户不存在。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    
+    name = user_info['first_name'] or user_info['username'] or f"用户{user_id}"
+    
+    message = f"⚠️ **确认移除用户**\n\n"
+    message += f"用户: **{name}**\n"
+    message += f"ID: `{user_id}`\n\n"
+    message += f"将要清除的数据:\n"
+    message += f"• 收到的评价: {user_info['received_votes']} 条\n"
+    message += f"• 给出的评价: {user_info['given_votes']} 条\n"
+    message += f"• 收藏记录: {user_info['favorites']} 条\n\n"
+    message += "选择清除范围:"
+    
+    keyboard = [
+        [InlineKeyboardButton("📥 只清除收到的评价", callback_data=f"admin_remove_user_received_{user_id}_{board_type}_{page}")],
+        [InlineKeyboardButton("🗑️ 清除所有相关数据", callback_data=f"admin_remove_user_all_{user_id}_{board_type}_{page}")],
+        [InlineKeyboardButton("❌ 取消", callback_data=f"admin_selective_remove_{board_type}_{page}")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def execute_user_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, removal_type: str, board_type: str, page: int):
+    """执行用户移除"""
+    query = update.callback_query
+    
+    try:
+        # 获取用户信息
+        user_info = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", user_id)
+        
+        if not user_info:
+            await query.edit_message_text(
+                "❌ 用户不存在或已被删除。",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
+                ]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        name = user_info['first_name'] or user_info['username'] or f"用户{user_id}"
+        
+        # 执行删除操作
+        async with db_transaction() as conn:
+            if removal_type == "received":
+                # 只删除收到的评价
+                received_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE target_id = $1", user_id)
+                fav_count = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE target_id = $1", user_id)
+                
+                await conn.execute("DELETE FROM reputations WHERE target_id = $1", user_id)
+                await conn.execute("DELETE FROM favorites WHERE target_id = $1", user_id)
+                
+                message = f"✅ **用户数据清除完成**\n\n"
+                message += f"用户: **{name}**\n"
+                message += f"已清除:\n"
+                message += f"• 收到的评价: {received_count} 条\n"
+                message += f"• 收藏记录: {fav_count} 条\n\n"
+                message += "该用户已从排行榜中移除。"
+                
+            elif removal_type == "all":
+                # 删除所有相关数据
+                received_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE target_id = $1", user_id)
+                given_count = await conn.fetchval("SELECT COUNT(*) FROM reputations WHERE voter_id = $1", user_id)
+                fav_given = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE user_id = $1", user_id)
+                fav_received = await conn.fetchval("SELECT COUNT(*) FROM favorites WHERE target_id = $1", user_id)
+                
+                await conn.execute("DELETE FROM reputations WHERE target_id = $1 OR voter_id = $1", user_id)
+                await conn.execute("DELETE FROM favorites WHERE user_id = $1 OR target_id = $1", user_id)
+                await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+                
+                message = f"✅ **用户完全清除完成**\n\n"
+                message += f"用户: **{name}**\n"
+                message += f"已清除:\n"
+                message += f"• 收到的评价: {received_count} 条\n"
+                message += f"• 给出的评价: {given_count} 条\n"
+                message += f"• 收藏记录: {fav_given + fav_received} 条\n"
+                message += f"• 用户资料: 已删除\n\n"
+                message += "该用户已完全从系统中清除。"
+        
+        # 清除缓存
+        from handlers.leaderboard import clear_leaderboard_cache
+        clear_leaderboard_cache()
+        
+        keyboard = [
+            [InlineKeyboardButton("🎯 继续清理", callback_data=f"admin_selective_remove_{board_type}_{page}")],
+            [InlineKeyboardButton("🔙 返回排行榜管理", callback_data="admin_leaderboard_panel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        logger.info(f"管理员 {update.effective_user.id} 清除了用户 {user_id} ({removal_type})")
+        
+    except Exception as e:
+        logger.error(f"清除用户失败: {e}", exc_info=True)
+        await query.edit_message_text(
+            "❌ 清除用户失败，请重试。",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 返回", callback_data=f"admin_selective_remove_{board_type}_{page}")
+            ]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
 async def remove_from_leaderboard_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """批量移除排行榜用户提示"""
     user_id = update.effective_user.id
@@ -1256,6 +1253,8 @@ async def show_all_commands(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     
+    # 接上面的代码
+
     if from_command:
         await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
     else:
