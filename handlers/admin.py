@@ -43,9 +43,8 @@ async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 更新用户活动
     await update_user_activity(update.effective_user.id, update.effective_user.username)
     
-    text = ("🏺 **存在抹除室** 🏺\n\n"
-            "此权柄可将一个存在从"英灵殿"与"放逐深渊"中彻底抹除，其所有赞誉与警示都将归于虚无。\n\n"
-            "此操作不可逆转，请谨慎使用。")
+    # 修复字符串连接的语法错误
+    text = "🏺 **存在抹除室** 🏺\n\n此权柄可将一个存在从\"英灵殿\"与\"放逐深渊\"中彻底抹除，其所有赞誉与警示都将归于虚无。\n\n此操作不可逆转，请谨慎使用。"
     keyboard = [
         [InlineKeyboardButton("✍️ 指定要抹除的存在", callback_data="admin_leaderboard_remove_prompt")],
         [InlineKeyboardButton("🔄 清空排行榜缓存", callback_data="admin_leaderboard_clear_cache")],
