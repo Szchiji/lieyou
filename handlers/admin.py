@@ -1,339 +1,557 @@
 import logging
-import json
-from typing import List, Dict, Any, Optional
+import re
+from enum import Enum
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-
-from database import db_fetch_one, db_fetch_all, db_execute, db_transaction
+from database import db_transaction
 
 logger = logging.getLogger(__name__)
 
-async def is_admin(user_id: int) -> bool:
-    """检查用户是否为管理员"""
-    try:
-        result = await db_fetch_one("SELECT is_admin FROM users WHERE id = $1", user_id)
-        return bool(result and result['is_admin'])
-    except Exception as e:
-        logger.error(f"检查管理员状态失败: {e}", exc_info=True)
-        return False
+# 定义管理员操作类型
+class AdminAction(Enum):
+    ADD_TAG_RECOMMEND = "add_tag_recommend"
+    ADD_TAG_BLOCK = "add_tag_block"
+    ADD_ADMIN = "add_admin"
+    SET_SETTING = "set_setting"
+    REMOVE_LEADERBOARD = "remove_leaderboard"
+    ADD_MOTTO = "add_motto"
+
+async def is_admin(user_id):
+    """检查用户是否是管理员"""
+    async with db_transaction() as conn:
+        result = await conn.fetchval("SELECT is_admin FROM users WHERE id = $1", user_id)
+        return bool(result)
 
 async def god_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """超级管理员模式，允许首次启动时设置管理员"""
-    try:
-        from os import environ
-        creator_id = environ.get("CREATOR_ID")
-        
-        if not creator_id:
-            await update.message.reply_text("❌ 创世神ID未配置，无法使用此功能。")
-            return
-        
-        user_id = update.effective_user.id
-        if str(user_id) != creator_id:
-            await update.message.reply_text("❌ 你不是创世神，无权访问。")
-            return
-            
-        # 为创世神授予管理员权限
-        async with db_transaction() as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (id, is_admin) 
-                VALUES ($1, TRUE) 
-                ON CONFLICT (id) DO UPDATE SET is_admin = TRUE
-                """, 
-                int(creator_id)
-            )
-            
-        await update.message.reply_text("✅ 创世神权限已恢复！你可以使用管理员功能了。")
-    except Exception as e:
-        logger.error(f"设置创世神权限失败: {e}", exc_info=True)
-        await update.message.reply_text("❌ 设置权限时发生错误，请查看日志。")
+    """处理 /godmode 命令 - 管理员入口"""
+    user_id = update.effective_user.id
+    
+    # 检查用户是否是管理员
+    if not await is_admin(user_id):
+        await update.message.reply_text("你不是守护者，无法使用此命令。")
+        return
+    
+    await settings_menu(update, context)
 
 async def settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示管理员设置菜单"""
-    user_id = update.effective_user.id
-    
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员，无权访问此菜单。", show_alert=True)
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("🏷️ 标签管理", callback_data="admin_panel_tags")],
-        [InlineKeyboardButton("👥 权限管理", callback_data="admin_panel_permissions")],
-        [InlineKeyboardButton("⚙️ 系统设置", callback_data="admin_panel_system")],
-        [InlineKeyboardButton("🏆 排行榜管理", callback_data="admin_leaderboard_panel")],
-        [InlineKeyboardButton("📋 命令列表", callback_data="admin_show_all_commands")],
-        [InlineKeyboardButton("« 返回", callback_data="back_to_help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    # 确认是通过命令还是回调查询访问的
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            "🌌 **时空枢纽**\n\n请选择要管理的功能：",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        query = update.callback_query
+        await query.answer()
+        edit_message = query.edit_message_text
     else:
-        await update.message.reply_text(
-            "🌌 **时空枢纽**\n\n请选择要管理的功能：",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        edit_message = update.message.reply_text
+    
+    # 创建管理员菜单按钮
+    keyboard = [
+        [
+            InlineKeyboardButton("🏷️ 标签管理", callback_data="admin_panel_tags"),
+            InlineKeyboardButton("👥 权限管理", callback_data="admin_panel_permissions")
+        ],
+        [
+            InlineKeyboardButton("⚙️ 系统设置", callback_data="admin_panel_system"),
+            InlineKeyboardButton("🏆 排行榜管理", callback_data="admin_leaderboard_panel")
+        ],
+        [
+            InlineKeyboardButton("📝 添加箴言", callback_data="admin_add_motto_prompt")
+        ],
+        [
+            InlineKeyboardButton("返回主菜单", callback_data="back_to_help")
+        ]
+    ]
+    
+    await edit_message(
+        "🌌 **时空枢纽** - 管理员控制面板\n\n请选择要管理的功能区域：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
 
-#
-# 标签管理
-#
+# ===== 标签管理 =====
 
 async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """标签管理面板"""
-    user_id = update.effective_user.id
+    """显示标签管理面板"""
+    query = update.callback_query
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
-        
     keyboard = [
-        [InlineKeyboardButton("➕ 添加推荐标签", callback_data="admin_tags_add_recommend_prompt")],
-        [InlineKeyboardButton("➕ 添加警告标签", callback_data="admin_tags_add_block_prompt")],
-        [InlineKeyboardButton("➕ 添加箴言", callback_data="admin_tags_add_quote_prompt")],
-        [InlineKeyboardButton("➕ 批量添加箴言", callback_data="admin_tags_add_multiple_quotes")],
-        [InlineKeyboardButton("❌ 移除标签", callback_data="admin_tags_remove_menu_1")],
-        [InlineKeyboardButton("📋 查看所有标签", callback_data="admin_tags_list")],
-        [InlineKeyboardButton("« 返回设置菜单", callback_data="admin_settings_menu")]
+        [
+            InlineKeyboardButton("➕ 添加推荐标签", callback_data="admin_tags_add_recommend_prompt"),
+            InlineKeyboardButton("➕ 添加警告标签", callback_data="admin_tags_add_block_prompt")
+        ],
+        [
+            InlineKeyboardButton("➖ 删除标签", callback_data="admin_tags_remove_menu_1"),
+            InlineKeyboardButton("📋 查看所有标签", callback_data="admin_tags_list")
+        ],
+        [
+            InlineKeyboardButton("返回设置菜单", callback_data="admin_settings_menu")
+        ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.callback_query.edit_message_text(
-        "🏷️ **标签管理**\n\n请选择操作：",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+    await query.edit_message_text(
+        "🏷️ **标签管理**\n\n管理可用于评价用户的标签。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
-async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_type: str):
-    """添加标签提示"""
-    user_id = update.effective_user.id
+async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_type):
+    """提示添加新标签"""
+    query = update.callback_query
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
+    # 保存下一步要执行的操作
+    context.user_data['next_action'] = AdminAction.ADD_TAG_RECOMMEND.value if tag_type == 'recommend' else AdminAction.ADD_TAG_BLOCK.value
     
-    context.user_data['next_action'] = f"add_tag_{tag_type}"
+    tag_type_text = "推荐标签" if tag_type == 'recommend' else "警告标签"
     
-    type_desc = "推荐" if tag_type == "recommend" else "警告" if tag_type == "block" else "箴言"
-    await update.callback_query.edit_message_text(
-        f"请发送要添加的{type_desc}标签内容\n\n"
-        f"你可以随时使用 /cancel 取消操作。",
-        reply_markup=None
+    # 创建取消按钮
+    keyboard = [[InlineKeyboardButton("取消", callback_data="admin_settings_menu")]]
+    
+    await query.edit_message_text(
+        f"请输入要添加的{tag_type_text}名称（不要包含#号）：\n"
+        f"您可以一次添加多个标签，每行一个标签。\n\n"
+        f"完成后，会自动返回标签管理面板。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
-async def add_multiple_quotes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """批量添加箴言提示"""
-    user_id = update.effective_user.id
+async def remove_tag_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page=1):
+    """显示可删除的标签列表"""
+    query = update.callback_query
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
+    # 获取标签列表
+    async with db_transaction() as conn:
+        all_tags = await conn.fetch("SELECT id, name, tag_type FROM tags ORDER BY tag_type, name")
+    
+    if not all_tags:
+        keyboard = [[InlineKeyboardButton("返回标签管理", callback_data="admin_panel_tags")]]
+        await query.edit_message_text(
+            "当前没有任何标签可删除。",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
     
-    context.user_data['next_action'] = "add_multiple_quotes"
+    # 分页处理
+    page_size = 8
+    total_pages = (len(all_tags) + page_size - 1) // page_size
+    page = max(1, min(page, total_pages))
     
-    await update.callback_query.edit_message_text(
-        "请发送要批量添加的箴言内容，每行一条\n\n"
-        "例如:\n箴言1\n箴言2\n箴言3\n\n"
-        "你可以随时使用 /cancel 取消操作。",
-        reply_markup=None
-    )
-
-async def remove_tag_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
-    """移除标签菜单"""
-    user_id = update.effective_user.id
+    start_idx = (page - 1) * page_size
+    end_idx = min(start_idx + page_size, len(all_tags))
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
-    
-    # 获取所有标签
-    page_size = 5
-    offset = (page - 1) * page_size
-    
-    tags = await db_fetch_all(
-        """
-        SELECT id, tag_type, content
-        FROM tags
-        ORDER BY tag_type, id
-        LIMIT $1 OFFSET $2
-        """,
-        page_size, offset
-    )
-    
-    total_count = await db_fetch_one("SELECT COUNT(*) FROM tags")
-    total_count = total_count[0] if total_count else 0
-    total_pages = (total_count + page_size - 1) // page_size
-    
-    # 生成标签列表
+    # 创建标签按钮
     keyboard = []
-    for tag in tags:
-        tag_id = tag['id']
-        tag_type = "👍" if tag['tag_type'] == 'recommend' else "👎" if tag['tag_type'] == 'block' else "📜"
-        content = tag['content']
-        if len(content) > 20:
-            content = content[:17] + "..."
-        keyboard.append([InlineKeyboardButton(f"{tag_type} {content}", callback_data=f"admin_tags_remove_confirm_{tag_id}_{page}")])
+    for i in range(start_idx, end_idx):
+        tag = all_tags[i]
+        tag_type_emoji = "✅" if tag['tag_type'] == 'recommend' else "❌"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{tag_type_emoji} {tag['name']}",
+                callback_data=f"admin_tags_remove_confirm_{tag['id']}_{page}"
+            )
+        ])
     
-    # 分页按钮
-    nav_row = []
+    # 添加翻页按钮
+    nav_buttons = []
     if page > 1:
-        nav_row.append(InlineKeyboardButton("« 上一页", callback_data=f"admin_tags_remove_menu_{page-1}"))
+        nav_buttons.append(
+            InlineKeyboardButton("◀️ 上一页", callback_data=f"admin_tags_remove_menu_{page-1}")
+        )
     if page < total_pages:
-        nav_row.append(InlineKeyboardButton("下一页 »", callback_data=f"admin_tags_remove_menu_{page+1}"))
-    if nav_row:
-        keyboard.append(nav_row)
+        nav_buttons.append(
+            InlineKeyboardButton("▶️ 下一页", callback_data=f"admin_tags_remove_menu_{page+1}")
+        )
     
-    # 返回按钮
-    keyboard.append([InlineKeyboardButton("« 返回标签管理", callback_data="admin_panel_tags")])
+    if nav_buttons:
+        keyboard.append(nav_buttons)
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # 添加返回按钮
+    keyboard.append([InlineKeyboardButton("返回标签管理", callback_data="admin_panel_tags")])
     
-    await update.callback_query.edit_message_text(
-        f"❌ **移除标签**\n\n"
-        f"请选择要移除的标签 (第 {page}/{total_pages} 页):",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+    await query.edit_message_text(
+        f"选择要删除的标签 (第 {page}/{total_pages} 页)：",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def remove_tag_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_id: int, page: int):
-    """确认移除标签"""
-    user_id = update.effective_user.id
-    
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
+async def remove_tag_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, tag_id, page):
+    """确认删除标签"""
+    query = update.callback_query
     
     # 获取标签信息
-    tag = await db_fetch_one("SELECT tag_type, content FROM tags WHERE id = $1", tag_id)
-    if not tag:
-        await update.callback_query.answer("❌ 标签不存在", show_alert=True)
-        return
+    async with db_transaction() as conn:
+        tag_info = await conn.fetchrow("SELECT name, tag_type FROM tags WHERE id = $1", tag_id)
+        if not tag_info:
+            await query.answer("该标签不存在或已被删除", show_alert=True)
+            await remove_tag_menu(update, context, page)
+            return
+        
+        # 检查标签是否有关联的评价
+        usage_count = await conn.fetchval("""
+            SELECT COUNT(*) FROM reputation_tags WHERE tag_id = $1
+        """, tag_id)
     
-    tag_type_desc = "推荐" if tag['tag_type'] == 'recommend' else "警告" if tag['tag_type'] == 'block' else "箴言"
-    content = tag['content']
+    tag_name = tag_info['name']
+    tag_type_text = "推荐标签" if tag_info['tag_type'] == 'recommend' else "警告标签"
     
+    # 创建确认按钮
     keyboard = [
-        [InlineKeyboardButton("⚠️ 确认移除", callback_data=f"admin_confirm_remove_tag_{tag_id}")],
-        [InlineKeyboardButton("« 返回", callback_data=f"admin_tags_remove_menu_{page}")]
+        [
+            InlineKeyboardButton("✅ 确认删除", callback_data=f"admin_tags_delete_{tag_id}_{page}"),
+            InlineKeyboardButton("❌ 取消", callback_data=f"admin_tags_remove_menu_{page}")
+        ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.callback_query.edit_message_text(
-        f"❓ **确认移除标签**\n\n"
-        f"类型: {tag_type_desc}\n"
-        f"内容: {content}\n\n"
-        f"⚠️ 警告: 移除标签后，所有使用该标签的评价将被删除！",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+    warning_text = f"确认要删除{tag_type_text} **{tag_name}**？\n\n"
+    if usage_count > 0:
+        warning_text += f"⚠️ 该标签已被使用了 {usage_count} 次。删除后，相关评价将失去此标签。"
+    
+    await query.edit_message_text(
+        warning_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
-async def list_all_tags(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
+async def list_all_tags(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """列出所有标签"""
-    user_id = update.effective_user.id
-    
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
+    query = update.callback_query
     
     # 获取所有标签
-    tags = await db_fetch_all(
-        """
-        SELECT tag_type, content, 
-            (SELECT COUNT(*) FROM reputation WHERE tag_id = tags.id) as usage_count
-        FROM tags
-        ORDER BY tag_type, content
-        """
-    )
+    async with db_transaction() as conn:
+        recommend_tags = await conn.fetch(
+            "SELECT name, COUNT(rt.tag_id) as usage FROM tags t "
+            "LEFT JOIN reputation_tags rt ON t.id = rt.tag_id "
+            "WHERE tag_type = 'recommend' "
+            "GROUP BY t.id, t.name "
+            "ORDER BY name"
+        )
+        
+        block_tags = await conn.fetch(
+            "SELECT name, COUNT(rt.tag_id) as usage FROM tags t "
+            "LEFT JOIN reputation_tags rt ON t.id = rt.tag_id "
+            "WHERE tag_type = 'block' "
+            "GROUP BY t.id, t.name "
+            "ORDER BY name"
+        )
     
-    # 按类型分组
-    recommend_tags = []
-    block_tags = []
-    quote_tags = []
+    # 创建标签列表文本
+    text = "📋 **系统中的所有标签**\n\n"
     
-    for tag in tags:
-        entry = f"{tag['content']} ({tag['usage_count']}次)"
-        if tag['tag_type'] == 'recommend':
-            recommend_tags.append(entry)
-        elif tag['tag_type'] == 'block':
-            block_tags.append(entry)
-        elif tag['tag_type'] == 'quote':
-            quote_tags.append(entry)
-    
-    # 生成标签列表
-    text = "📋 **所有标签列表**\n\n"
-    
-    text += "👍 **推荐标签**:\n"
+    # 推荐标签
+    text += "**✅ 推荐标签：**\n"
     if recommend_tags:
-        text += "\n".join(f"- {tag}" for tag in recommend_tags)
+        for i, tag in enumerate(recommend_tags, 1):
+            text += f"{i}. #{tag['name']} (使用次数: {tag['usage']})\n"
     else:
-        text += "无"
-    text += "\n\n"
+        text += "暂无推荐标签\n"
     
-    text += "👎 **警告标签**:\n"
+    text += "\n**❌ 警告标签：**\n"
     if block_tags:
-        text += "\n".join(f"- {tag}" for tag in block_tags)
+        for i, tag in enumerate(block_tags, 1):
+            text += f"{i}. #{tag['name']} (使用次数: {tag['usage']})\n"
     else:
-        text += "无"
-    text += "\n\n"
+        text += "暂无警告标签\n"
     
-    text += "📜 **箴言**:\n"
-    if quote_tags:
-        text += "\n".join(f"- {tag}" for tag in quote_tags[:10])
-        if len(quote_tags) > 10:
-            text += f"\n...等共 {len(quote_tags)} 条"
-    else:
-        text += "无"
+    # 创建返回按钮
+    keyboard = [[InlineKeyboardButton("返回标签管理", callback_data="admin_panel_tags")]]
     
-    keyboard = [[InlineKeyboardButton("« 返回标签管理", callback_data="admin_panel_tags")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.callback_query.edit_message_text(
+    await query.edit_message_text(
         text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
-#
-# 权限管理
-#
+# ===== 权限管理 =====
 
 async def permissions_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """权限管理面板"""
-    user_id = update.effective_user.id
+    """显示权限管理面板"""
+    query = update.callback_query
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
-        return
-        
     keyboard = [
-        [InlineKeyboardButton("➕ 添加管理员", callback_data="admin_perms_add_prompt")],
-        [InlineKeyboardButton("❌ 移除管理员", callback_data="admin_perms_remove_menu")],
-        [InlineKeyboardButton("📋 查看所有管理员", callback_data="admin_perms_list")],
-        [InlineKeyboardButton("« 返回设置菜单", callback_data="admin_settings_menu")]
+        [
+            InlineKeyboardButton("➕ 添加管理员", callback_data="admin_perms_add_prompt"),
+            InlineKeyboardButton("➖ 删除管理员", callback_data="admin_perms_remove_menu")
+        ],
+        [
+            InlineKeyboardButton("📋 查看管理员列表", callback_data="admin_perms_list")
+        ],
+        [
+            InlineKeyboardButton("返回设置菜单", callback_data="admin_settings_menu")
+        ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.callback_query.edit_message_text(
-        "👥 **权限管理**\n\n请选择操作：",
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.MARKDOWN
+    await query.edit_message_text(
+        "👥 **权限管理**\n\n管理可访问管理面板的用户。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
 async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """添加管理员提示"""
-    user_id = update.effective_user.id
+    """提示添加新管理员"""
+    query = update.callback_query
     
-    if not await is_admin(user_id):
-        await update.callback_query.answer("❌ 你不是管理员", show_alert=True)
+    # 保存下一步要执行的操作
+    context.user_data['next_action'] = AdminAction.ADD_ADMIN.value
+    
+    # 创建取消按钮
+    keyboard = [[InlineKeyboardButton("取消", callback_data="admin_panel_permissions")]]
+    
+    await query.edit_message_text(
+        "请输入要添加为管理员的用户ID：\n"
+        "(用户ID必须是一个数字，可以通过 @userinfobot 获取)",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """列出所有管理员"""
+    query = update.callback_query
+    
+    # 获取所有管理员
+    async with db_transaction() as conn:
+        admins = await conn.fetch(
+            "SELECT id, username, created_at FROM users WHERE is_admin = TRUE ORDER BY created_at"
+        )
+    
+    # 创建管理员列表文本
+    text = "👥 **系统管理员列表**\n\n"
+    
+    if admins:
+        for i, admin in enumerate(admins, 1):
+            username = admin['username'] or "未知用户名"
+            join_date = admin['created_at'].strftime("%Y-%m-%d")
+            text += f"{i}. @{username} (ID: {admin['id']}, 加入时间: {join_date})\n"
+    else:
+        text += "系统中没有管理员记录。"
+    
+    # 创建返回按钮
+    keyboard = [[InlineKeyboardButton("返回权限管理", callback_data="admin_panel_permissions")]]
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def remove_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示可删除的管理员列表"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # 获取除了当前用户之外的所有管理员
+    async with db_transaction() as conn:
+        admins = await conn.fetch(
+            "SELECT id, username FROM users WHERE is_admin = TRUE AND id != $1 ORDER BY username",
+            user_id
+        )
+    
+    if not admins:
+        keyboard = [[InlineKeyboardButton("返回权限管理", callback_data="admin_panel_permissions")]]
+        await query.edit_message_text(
+            "没有其他管理员可以删除。",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
         return
     
-    context.user_data['next_action'] = "add_admin"
+    # 创建管理员按钮
+    keyboard = []
+    for admin in admins:
+        username = admin['username'] or f"用户 {admin['id']}"
+        keyboard.append([
+            InlineKeyboardButton(
+                f"@{username}",
+                callback_data=f"admin_perms_remove_confirm_{admin['id']}"
+            )
+        ])
     
-    await update.callback_query.edit_message_text(
-        "请发送要添加为管理员的
+    # 添加返回按钮
+    keyboard.append([InlineKeyboardButton("返回权限管理", callback_data="admin_panel_permissions")])
+    
+    await query.edit_message_text(
+        "选择要移除管理员权限的用户：",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def remove_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_id):
+    """确认删除管理员"""
+    query = update.callback_query
+    
+    # 获取管理员信息
+    async with db_transaction() as conn:
+        admin_info = await conn.fetchrow(
+            "SELECT username FROM users WHERE id = $1 AND is_admin = TRUE",
+            admin_id
+        )
+        
+        if not admin_info:
+            await query.answer("该用户不是管理员或不存在", show_alert=True)
+            await remove_admin_menu(update, context)
+            return
+        
+        # 执行权限移除
+        await conn.execute(
+            "UPDATE users SET is_admin = FALSE WHERE id = $1",
+            admin_id
+        )
+    
+    username = admin_info['username'] or f"用户 {admin_id}"
+    
+    await query.answer(f"已移除 @{username} 的管理员权限", show_alert=True)
+    
+    # 返回管理员列表
+    await remove_admin_menu(update, context)
+
+# ===== 系统设置 =====
+
+async def system_settings_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示系统设置面板"""
+    query = update.callback_query
+    
+    # 获取当前设置
+    async with db_transaction() as conn:
+        settings = await conn.fetch("SELECT key, value FROM settings")
+    
+    settings_dict = {row['key']: row['value'] for row in settings}
+    
+    # 创建设置列表文本
+    text = "⚙️ **系统设置**\n\n"
+    
+    # 显示设置项
+    settings_map = {
+        "min_reputation_votes": "最低评价阈值",
+        "max_daily_votes": "每日最大投票数",
+        "leaderboard_min_votes": "排行榜最低阈值",
+        "leaderboard_size": "排行榜显示数量"
+    }
+    
+    for key, name in settings_map.items():
+        value = settings_dict.get(key, "未设置")
+        text += f"• **{name}**: {value}\n"
+    
+    # 创建设置按钮
+    keyboard = []
+    for key, name in settings_map.items():
+        keyboard.append([
+            InlineKeyboardButton(f"设置 {name}", callback_data=f"admin_system_set_prompt_{key}")
+        ])
+    
+    # 添加箴言管理按钮
+    keyboard.append([
+        InlineKeyboardButton("📝 添加箴言", callback_data="admin_add_motto_prompt")
+    ])
+    
+    # 添加返回按钮
+    keyboard.append([InlineKeyboardButton("返回设置菜单", callback_data="admin_settings_menu")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def set_setting_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, setting_key):
+    """提示设置系统设置值"""
+    query = update.callback_query
+    
+    # 保存下一步要执行的操作和设置键
+    context.user_data['next_action'] = AdminAction.SET_SETTING.value
+    context.user_data['setting_key'] = setting_key
+    
+    # 获取设置的名称
+    settings_map = {
+        "min_reputation_votes": "最低评价阈值",
+        "max_daily_votes": "每日最大投票数",
+        "leaderboard_min_votes": "排行榜最低阈值",
+        "leaderboard_size": "排行榜显示数量"
+    }
+    
+    setting_name = settings_map.get(setting_key, setting_key)
+    
+    # 获取当前设置值
+    async with db_transaction() as conn:
+        setting_value = await conn.fetchval(
+            "SELECT value FROM settings WHERE key = $1",
+            setting_key
+        )
+    
+    # 创建取消按钮
+    keyboard = [[InlineKeyboardButton("取消", callback_data="admin_panel_system")]]
+    
+    await query.edit_message_text(
+        f"请输入 **{setting_name}** 的新值：\n"
+        f"(当前值: {setting_value or '未设置'})\n\n"
+        f"此项设置应该为一个整数值。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+# ===== 排行榜管理 =====
+
+async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示排行榜管理面板"""
+    query = update.callback_query
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("移除用户从排行榜", callback_data="admin_leaderboard_remove_prompt"),
+            InlineKeyboardButton("清除排行榜缓存", callback_data="admin_leaderboard_clear_cache")
+        ],
+        [
+            InlineKeyboardButton("返回设置菜单", callback_data="admin_settings_menu")
+        ]
+    ]
+    
+    await query.edit_message_text(
+        "🏆 **排行榜管理**\n\n"
+        "在这里您可以管理系统排行榜功能。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def remove_from_leaderboard_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """提示输入要从排行榜中移除的用户"""
+    query = update.callback_query
+    
+    # 保存下一步要执行的操作
+    context.user_data['next_action'] = AdminAction.REMOVE_LEADERBOARD.value
+    
+    # 创建取消按钮
+    keyboard = [[InlineKeyboardButton("取消", callback_data="admin_leaderboard_panel")]]
+    
+    await query.edit_message_text(
+        "请输入要从排行榜中移除的用户ID或用户名：\n"
+        "(用户ID必须是一个数字，用户名需要包含@符号)",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ===== 箴言管理 =====
+
+async def add_motto_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """提示添加新箴言"""
+    query = update.callback_query
+    
+    # 保存下一步要执行的操作
+    context.user_data['next_action'] = AdminAction.ADD_MOTTO.value
+    
+    # 创建取消按钮
+    keyboard = [[InlineKeyboardButton("取消", callback_data="admin_settings_menu")]]
+    
+    await query.edit_message_text(
+        "请输入要添加的箴言内容：\n"
+        "您可以一次添加多条箴言，每行一条。\n\n"
+        "完成后，会自动返回到设置菜单。",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+# ===== 处理管理员输入 =====
+
+async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理管理员在私聊中的输入"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # 检查用户是否是管理员
+    if not await is_admin(user_id):
+        await update.message.reply_text("你不是守护者，无法执行管理操作。")
+        return
+    
+    # 检查是否有待处理的操作
+    if 'next_action' not in context.user_data:
