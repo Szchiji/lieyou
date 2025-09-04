@@ -56,13 +56,11 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
     """
     
     params = [min_votes, page_size, offset]
-    param_count = 4
     
     # 添加标签过滤
     if tag_filter:
-        base_query += f" WHERE r.tag_id = ${param_count}"
+        base_query += " WHERE $4 = ANY(r.tag_ids)"
         params.append(tag_filter)
-        param_count += 1
     
     base_query += """
             GROUP BY u.id, u.username, u.first_name
@@ -83,7 +81,7 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
     else:
         base_query += " ORDER BY reputation_score ASC, total_votes DESC"
     
-    base_query += f" LIMIT ${param_count-1} OFFSET ${param_count}"
+    base_query += " LIMIT $2 OFFSET $3"
     
     # 执行查询
     results = await db_fetch_all(base_query, *params)
@@ -97,7 +95,7 @@ async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None
     
     count_params = [min_votes]
     if tag_filter:
-        count_query += " WHERE r.tag_id = $2"
+        count_query += " WHERE $2 = ANY(r.tag_ids)"
         count_params.append(tag_filter)
     
     count_query += """
