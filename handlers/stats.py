@@ -106,18 +106,4 @@ async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "\n".join(text_parts)
         
     except Exception as e:
-        logger.error(f"获取统计数据失败: {e}", exc_info=True)
-        text = "⚠️ <b>获取神谕数据时遇到问题</b>\n\n系统正在维护中，请稍后再试。"
-    
-    # 创建按钮
-    keyboard = [
-        [InlineKeyboardButton("🔄 刷新数据", callback_data="show_system_stats")],
-        [InlineKeyboardButton("🌍 返回凡界", callback_data="back_to_help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # 发送或更新消息
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        logger.error(f"获取统计数据失败: {e}",
