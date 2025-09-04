@@ -1,616 +1,473 @@
 import logging
-import re
-import asyncio
-import random
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
-from database import db_transaction, update_user_activity
+
+from database import (
+    db_transaction, update_user_activity, get_user_by_username,
+    get_tags_by_type, add_nomination, get_reputation_summary,
+    get_reputation_details, get_reputation_voters, get_tag_by_id,
+    is_favorite, toggle_favorite, get_user_name
+)
 
 logger = logging.getLogger(__name__)
 
-# 评价按钮的表情
-POSITIVE_EMOJI = "👍"
-NEGATIVE_EMOJI = "👎"
-
-# 缓存用户查看次数 {user_id: {target_id: last_view_time}}
-user_view_cache = {}
-# 缓存最近查询的用户数据 {target_id: {data}}
-reputation_cache = {}
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300  # 5分钟
-
-async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理用户在群聊中提名其他用户查看声誉"""
+async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理用户提名"""
     message = update.message
-    mentioned_user = None
     
-    # 尝试从正则表达式匹配中获取用户名
-    match = re.search(r'@(\w{5,})', message.text)
-    if match:
-        username = match.group(1)
-        
-        # 在数据库中查找用户
-        async with db_transaction() as conn:
-            user_data = await conn.fetchrow(
-                "SELECT id FROM users WHERE username = $1", username
-            )
-            if user_data:
-                mentioned_user = user_data['id']
+    # 从消息中提取@的用户名
+    username = None
+    match = None
     
-    if mentioned_user:
-        # 更新查询发起人的活动状态
-        await update_user_activity(update.effective_user.id, update.effective_user.username)
-        
-        # 构建信息和投票按钮
-        reputation_data = await get_reputation_summary(mentioned_user, username)
-        text, keyboard = create_reputation_message(reputation_data, mentioned_user)
-        
-        await message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-
-async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理用户通过"查询 @username"格式查询其他用户"""
-    message = update.message
-    text = message.text
+    if message.text.startswith("查询"):
+        match = context.matches[0]
+        if match.group(1):
+            username = match.group(1)
+        elif match.group(2):
+            username = match.group(2)
+    else:
+        match = context.matches[0]
+        if match.group(1):
+            username = match.group(1)
     
-    # 尝试从正则表达式匹配中获取用户名
-    match = re.search(r'查询\s+@(\w{5,})', text)
-    if not match:
-        await message.reply_text("请使用格式: 查询 @用户名")
+    if not username:
+        await message.reply_text("未能识别用户名")
         return
     
-    username = match.group(1)
+    # 更新调用者的活动时间
+    caller_id = update.effective_user.id
+    caller_username = update.effective_user.username
+    await update_user_activity(caller_id, caller_username)
     
-    # 在数据库中查找用户
-    async with db_transaction() as conn:
-        user_data = await conn.fetchrow(
-            "SELECT id FROM users WHERE username = $1", username
-        )
-    
-    if not user_data:
+    # 获取被提名用户
+    nominee = await get_user_by_username(username)
+    if not nominee:
         await message.reply_text(f"未找到用户 @{username}")
         return
     
-    mentioned_user = user_data['id']
+    nominee_id = nominee['id']
     
-    # 更新查询发起人的活动状态
-    await update_user_activity(update.effective_user.id, update.effective_user.username)
+    # 如果是查询自己
+    if nominee_id == caller_id:
+        await message.reply_text("自己评价自己？还是先听听别人怎么说吧！")
+        return
     
-    # 构建信息和投票按钮
-    reputation_data = await get_reputation_summary(mentioned_user, username)
-    text, keyboard = create_reputation_message(reputation_data, mentioned_user)
+    # 获取声誉摘要
+    rep_summary = await get_reputation_summary(nominee_id)
     
-    await message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-def create_reputation_message(data, target_id):
-    """创建声誉信息显示和按钮"""
-    username = data.get('username', '未知用户')
-    positive = data.get('positive', 0)
-    negative = data.get('negative', 0)
-    total = positive + negative
+    # 构建回复消息
+    is_faved = await is_favorite(caller_id, nominee_id)
+    text = format_reputation_summary(username, rep_summary, is_faved)
     
-    # 计算声誉百分比和星级显示
-    reputation_pct = (positive / total * 100) if total > 0 else 50
-    stars = "★" * int(reputation_pct / 20 + 0.5) + "☆" * (5 - int(reputation_pct / 20 + 0.5))
-    
-    # 准备评价标签显示
-    top_positive_tags = data.get('top_positive_tags', [])
-    top_negative_tags = data.get('top_negative_tags', [])
-    
-    pos_tags_text = ", ".join([f"#{tag}" for tag, _ in top_positive_tags]) if top_positive_tags else "无"
-    neg_tags_text = ", ".join([f"#{tag}" for tag, _ in top_negative_tags]) if top_negative_tags else "无"
-    
-    # 随机选择一条箴言
-    motto = data.get('random_motto', '智者仁心，常怀谨慎之思。')
-    
-    # 构建消息文本
-    text = (
-        f"🔮 **{username}** 的神谕之卷\n\n"
-        f"**声誉指数:** {stars} ({reputation_pct:.1f}%)\n"
-        f"**好评:** {positive} | **差评:** {negative} | **总计:** {total}\n\n"
-        f"**优势标签:** {pos_tags_text}\n"
-        f"**劣势标签:** {neg_tags_text}\n\n"
-        f"**神谕箴言:**\n_{motto}_"
-    )
-    
-    # 构建按钮
+    # 创建按钮
     keyboard = [
         [
-            InlineKeyboardButton(f"{POSITIVE_EMOJI} 好评", callback_data=f"vote_positive_{target_id}"),
-            InlineKeyboardButton(f"{NEGATIVE_EMOJI} 差评", callback_data=f"vote_negative_{target_id}")
+            InlineKeyboardButton("👍 好评", callback_data=f"vote_good_{nominee_id}"),
+            InlineKeyboardButton("👎 差评", callback_data=f"vote_bad_{nominee_id}")
         ],
         [
-            InlineKeyboardButton("查看详情", callback_data=f"rep_detail_{target_id}"),
-            InlineKeyboardButton("收藏", callback_data=f"query_fav_add_{target_id}")
-        ],
-        [
-            InlineKeyboardButton("评价者", callback_data=f"rep_voters_menu_{target_id}")
+            InlineKeyboardButton("📊 详情", callback_data=f"rep_detail_{nominee_id}"),
+            InlineKeyboardButton("❤️ 收藏" if not is_faved else "💔 取消收藏", 
+                               callback_data=f"query_fav_{nominee_id}")
         ]
     ]
     
-    return text, keyboard
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
-async def get_reputation_summary(user_id, username=None):
-    """获取用户声誉摘要数据"""
-    # 检查缓存
-    now = datetime.now()
-    if user_id in reputation_cache:
-        cache_time, data = reputation_cache[user_id]
-        if (now - cache_time).total_seconds() < CACHE_EXPIRY:
-            return data
+async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """在私聊中处理用户名查询"""
+    message = update.message
     
-    async with db_transaction() as conn:
-        # 获取基本声誉数据
-        if username:
-            # 如果提供了用户名，更新用户记录
-            await conn.execute(
-                """
-                INSERT INTO users (id, username) VALUES ($1, $2)
-                ON CONFLICT (id) DO UPDATE SET username = $2
-                """,
-                user_id, username
-            )
+    match = context.matches[0]
+    username = match.group(1)
+    if not username:
+        await message.reply_text("未能识别用户名")
+        return
+    
+    # 更新调用者的活动时间
+    caller_id = update.effective_user.id
+    caller_username = update.effective_user.username
+    await update_user_activity(caller_id, caller_username)
+    
+    # 获取被提名用户
+    nominee = await get_user_by_username(username)
+    if not nominee:
+        await message.reply_text(f"未找到用户 @{username}")
+        return
+    
+    nominee_id = nominee['id']
+    
+    # 如果是查询自己
+    if nominee_id == caller_id:
+        await message.reply_text("自己评价自己？还是先听听别人怎么说吧！")
+        return
+    
+    # 获取声誉摘要
+    rep_summary = await get_reputation_summary(nominee_id)
+    
+    # 构建回复消息
+    is_faved = await is_favorite(caller_id, nominee_id)
+    text = format_reputation_summary(username, rep_summary, is_faved)
+    
+    # 创建按钮
+    keyboard = [
+        [
+            InlineKeyboardButton("👍 好评", callback_data=f"vote_good_{nominee_id}"),
+            InlineKeyboardButton("👎 差评", callback_data=f"vote_bad_{nominee_id}")
+        ],
+        [
+            InlineKeyboardButton("📊 详情", callback_data=f"rep_detail_{nominee_id}"),
+            InlineKeyboardButton("❤️ 收藏" if not is_faved else "💔 取消收藏", 
+                               callback_data=f"query_fav_{nominee_id}")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+def format_reputation_summary(username: str, rep_summary: Dict, is_faved: bool = False) -> str:
+    """格式化声誉摘要信息"""
+    positive = rep_summary.get('positive_count', 0)
+    negative = rep_summary.get('negative_count', 0)
+    voter_count = rep_summary.get('voter_count', 0)
+    top_tags = rep_summary.get('top_tags', [])
+    
+    # 不使用特殊字体，使用普通文本显示用户名
+    header = f"🔮 **用户 @{username}** 的神谕卷轴"
+    if is_faved:
+        header += " ❤️"
+    
+    text_parts = [header, ""]
+    
+    if positive == 0 and negative == 0:
+        text_parts.append("📜 此人尚无神谕记录")
+    else:
+        # 添加好评/差评比例
+        total = positive + negative
+        if total > 0:
+            positive_percent = int(positive / total * 100)
+            reputation_bar = generate_reputation_bar(positive_percent)
+            text_parts.append(f"📊 **声誉比例**: {positive_percent}% 好评")
+            text_parts.append(f"{reputation_bar}")
+        
+        text_parts.append(f"👥 **点评人数**: {voter_count} 位")
+        
+        # 添加最常见标签
+        if top_tags:
+            text_parts.append("\n🏷 **常见标签**:")
+            for tag in top_tags:
+                emoji = "👍" if tag['tag_type'] == 'recommend' else "👎"
+                count = tag['count']
+                content = tag['content']
+                text_parts.append(f"{emoji} {content} ({count})")
+    
+    return "\n".join(text_parts)
+
+def generate_reputation_bar(positive_percent: int) -> str:
+    """生成可视化的声誉条"""
+    total_blocks = 10
+    positive_blocks = round(positive_percent / 100 * total_blocks)
+    negative_blocks = total_blocks - positive_blocks
+    
+    bar = "🟩" * positive_blocks + "🟥" * negative_blocks
+    return bar
+
+async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示用户声誉摘要"""
+    query = update.callback_query
+    data = query.data
+    nominee_id = int(data.split('_')[-1])
+    
+    caller_id = update.effective_user.id
+    await update_user_activity(caller_id)
+    
+    # 获取被提名用户名
+    username = await get_user_name(nominee_id)
+    
+    # 获取声誉摘要
+    rep_summary = await get_reputation_summary(nominee_id)
+    
+    # 构建回复消息
+    is_faved = await is_favorite(caller_id, nominee_id)
+    text = format_reputation_summary(username, rep_summary, is_faved)
+    
+    # 创建按钮
+    keyboard = [
+        [
+            InlineKeyboardButton("👍 好评", callback_data=f"vote_good_{nominee_id}"),
+            InlineKeyboardButton("👎 差评", callback_data=f"vote_bad_{nominee_id}")
+        ],
+        [
+            InlineKeyboardButton("📊 详情", callback_data=f"rep_detail_{nominee_id}"),
+            InlineKeyboardButton("❤️ 收藏" if not is_faved else "💔 取消收藏", 
+                               callback_data=f"query_fav_{nominee_id}")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示用户声誉详情"""
+    query = update.callback_query
+    data = query.data
+    nominee_id = int(data.split('_')[-1])
+    
+    caller_id = update.effective_user.id
+    await update_user_activity(caller_id)
+    
+    # 获取被提名用户名
+    username = await get_user_name(nominee_id)
+    
+    # 获取声誉详情
+    rep_details = await get_reputation_details(nominee_id)
+    
+    # 构建回复消息
+    text = format_reputation_details(username, rep_details)
+    
+    # 创建按钮
+    keyboard = []
+    
+    # 推荐标签投票者按钮
+    recommend_tags = rep_details.get('recommend_tags', [])
+    if recommend_tags:
+        keyboard.append([InlineKeyboardButton("👍 查看好评详情", callback_data=f"rep_voters_menu_{nominee_id}_recommend")])
+    
+    # 警告标签投票者按钮
+    block_tags = rep_details.get('block_tags', [])
+    if block_tags:
+        keyboard.append([InlineKeyboardButton("👎 查看差评详情", callback_data=f"rep_voters_menu_{nominee_id}_block")])
+    
+    # 返回摘要按钮
+    keyboard.append([InlineKeyboardButton("🔙 返回摘要", callback_data=f"rep_summary_{nominee_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+def format_reputation_details(username: str, rep_details: Dict) -> str:
+    """格式化声誉详情信息"""
+    recommend_tags = rep_details.get('recommend_tags', [])
+    block_tags = rep_details.get('block_tags', [])
+    
+    text_parts = [f"🔍 **用户 @{username}** 的详细神谕", ""]
+    
+    if not recommend_tags and not block_tags:
+        text_parts.append("📜 此人尚无神谕记录")
+        return "\n".join(text_parts)
+    
+    # 添加推荐标签
+    if recommend_tags:
+        text_parts.append("👍 **好评标签**:")
+        for tag in recommend_tags:
+            content = tag['content']
+            count = tag['count']
+            text_parts.append(f"• {content} ({count})")
+    
+    # 添加警告标签
+    if block_tags:
+        if recommend_tags:
+            text_parts.append("")  # 添加空行分隔
+        text_parts.append("👎 **差评标签**:")
+        for tag in block_tags:
+            content = tag['content']
+            count = tag['count']
+            text_parts.append(f"• {content} ({count})")
+    
+    return "\n".join(text_parts)
+
+async def show_voters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示投票者菜单"""
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    nominee_id = int(parts[-2])
+    tag_type = parts[-1]
+    
+    caller_id = update.effective_user.id
+    await update_user_activity(caller_id)
+    
+    # 获取被提名用户名
+    username = await get_user_name(nominee_id)
+    
+    # 获取声誉详情
+    rep_details = await get_reputation_details(nominee_id)
+    
+    # 选择相应类型的标签
+    if tag_type == 'recommend':
+        tags = rep_details.get('recommend_tags', [])
+        title = f"👍 **@{username} 的好评标签投票者**"
+    else:
+        tags = rep_details.get('block_tags', [])
+        title = f"👎 **@{username} 的差评标签投票者**"
+    
+    # 构建回复消息
+    text_parts = [title, ""]
+    if not tags:
+        text_parts.append("没有相关标签")
+    else:
+        text_parts.append("请选择要查看的标签:")
+    
+    # 创建按钮 - 每个标签一个按钮
+    keyboard = []
+    for tag in tags[:8]:  # 限制最多8个按钮以避免超过Telegram限制
+        content = tag['content']
+        count = tag['count']
+        tag_id = tag['id']
+        keyboard.append([InlineKeyboardButton(
+            f"{content} ({count})", 
+            callback_data=f"rep_voters_{nominee_id}_{tag_id}"
+        )])
+    
+    # 返回详情按钮
+    keyboard.append([InlineKeyboardButton("🔙 返回详情", callback_data=f"rep_detail_{nominee_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("\n".join(text_parts), reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """显示特定标签的投票者"""
+    query = update.callback_query
+    data = query.data
+    parts = data.split('_')
+    nominee_id = int(parts[-2])
+    tag_id = int(parts[-1])
+    
+    caller_id = update.effective_user.id
+    await update_user_activity(caller_id)
+    
+    # 获取被提名用户名和标签信息
+    username = await get_user_name(nominee_id)
+    tag = await get_tag_by_id(tag_id)
+    
+    if not tag:
+        await query.edit_message_text("标签不存在或已被删除")
+        return
+    
+    # 获取投票者列表
+    voters = await get_reputation_voters(nominee_id, tag_id)
+    
+    # 构建回复消息
+    tag_type_emoji = "👍" if tag['tag_type'] == 'recommend' else "👎"
+    text_parts = [f"{tag_type_emoji} **标签 \"{tag['content']}\" 的投票者**", ""]
+    
+    if not voters:
+        text_parts.append("没有投票记录")
+    else:
+        for i, voter in enumerate(voters, start=1):
+            voter_name = voter['username'] or f"用户{voter['id']}"
+            vote_time = voter['created_at'].strftime("%Y-%m-%d %H:%M")
+            text_parts.append(f"{i}. @{voter_name} - {vote_time}")
+    
+    # 创建返回按钮
+    keyboard = [[InlineKeyboardButton(
+        "🔙 返回标签列表", 
+        callback_data=f"rep_voters_menu_{nominee_id}_{'recommend' if tag['tag_type'] == 'recommend' else 'block'}"
+    )]]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text("\n".join(text_parts), reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理按钮回调"""
+    query = update.callback_query
+    data = query.data
+    
+    caller_id = update.effective_user.id
+    caller_username = update.effective_user.username
+    await update_user_activity(caller_id, caller_username)
+    
+    # 处理投票相关回调
+    if data.startswith("vote_"):
+        parts = data.split('_')
+        vote_type = parts[1]  # good 或 bad
+        nominee_id = int(parts[2])
+        
+        # 如果是查询自己
+        if nominee_id == caller_id:
+            await query.answer("不能给自己投票", show_alert=True)
+            return
+        
+        # 获取相应类型的标签
+        tag_type = 'recommend' if vote_type == 'good' else 'block'
+        tags = await get_tags_by_type(tag_type)
+        
+        if not tags:
+            await query.answer(f"没有可用的{'推荐' if tag_type == 'recommend' else '警告'}标签", show_alert=True)
+            return
+        
+        # 创建标签选择按钮
+        keyboard = []
+        for i, tag in enumerate(tags):
+            if i % 2 == 0:
+                keyboard.append([])
+            keyboard[-1].append(InlineKeyboardButton(
+                tag['content'], 
+                callback_data=f"tag_{tag_type}_{nominee_id}_{tag['id']}"
+            ))
+        
+        # 增加多选功能
+        if tag_type == 'recommend':
+            keyboard.append([InlineKeyboardButton("✅ 多选好评", callback_data=f"tag_multi_recommend_{nominee_id}")])
         else:
-            # 尝试获取用户名
-            user_data = await conn.fetchrow("SELECT username FROM users WHERE id = $1", user_id)
-            if user_data and user_data['username']:
-                username = user_data['username']
-            else:
-                username = f"用户{user_id}"
+            keyboard.append([InlineKeyboardButton("✅ 多选差评", callback_data=f"tag_multi_block_{nominee_id}")])
         
-        # 获取好评和差评数量
-        reputation_counts = await conn.fetchrow(
-            """
-            SELECT 
-                COUNT(*) FILTER (WHERE is_positive = TRUE) as positive,
-                COUNT(*) FILTER (WHERE is_positive = FALSE) as negative
-            FROM reputations
-            WHERE target_id = $1
-            """,
-            user_id
+        # 返回按钮
+        keyboard.append([InlineKeyboardButton("🔙 返回", callback_data=f"rep_summary_{nominee_id}")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"请选择{'👍 好评' if tag_type == 'recommend' else '👎 差评'}标签:", 
+            reply_markup=reply_markup
         )
-        
-        positive = reputation_counts['positive'] if reputation_counts else 0
-        negative = reputation_counts['negative'] if reputation_counts else 0
-        
-        # 获取热门标签
-        positive_tags = await conn.fetch(
-            """
-            SELECT t.name, COUNT(*) as count
-            FROM reputation_tags rt
-            JOIN reputations r ON rt.reputation_id = r.id
-            JOIN tags t ON rt.tag_id = t.id
-            WHERE r.target_id = $1 AND r.is_positive = TRUE
-            GROUP BY t.name
-            ORDER BY count DESC
-            LIMIT 3
-            """,
-            user_id
-        )
-        
-        negative_tags = await conn.fetch(
-            """
-            SELECT t.name, COUNT(*) as count
-            FROM reputation_tags rt
-            JOIN reputations r ON rt.reputation_id = r.id
-            JOIN tags t ON rt.tag_id = t.id
-            WHERE r.target_id = $1 AND r.is_positive = FALSE
-            GROUP BY t.name
-            ORDER BY count DESC
-            LIMIT 3
-            """,
-            user_id
-        )
-        
-        # 获取随机箴言
-        motto_row = await conn.fetchrow("SELECT content FROM mottos ORDER BY RANDOM() LIMIT 1")
-        random_motto = motto_row['content'] if motto_row else "智者仁心，常怀谨慎之思。"
-        
-        # 组装数据
-        data = {
-            'username': username,
-            'positive': positive,
-            'negative': negative,
-            'top_positive_tags': [(row['name'], row['count']) for row in positive_tags],
-            'top_negative_tags': [(row['name'], row['count']) for row in negative_tags],
-            'random_motto': random_motto
-        }
-        
-        # 更新缓存
-        reputation_cache[user_id] = (now, data)
-        return data
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理与声誉相关的按钮点击"""
-    query = update.callback_query
-    user_id = update.effective_user.id
-    data = query.data
     
-    # 更新用户活动状态
-    await update_user_activity(user_id, update.effective_user.username)
-    
-    try:
-        if data.startswith("vote_"):
-            # 处理投票
-            parts = data.split("_")
-            if len(parts) != 3:
-                await query.answer("无效的操作", show_alert=True)
-                return
+    # 处理标签选择回调
+    elif data.startswith("tag_"):
+        parts = data.split('_')
+        
+        # 多选标签模式
+        if parts[1] == "multi":
+            tag_type = parts[2]  # recommend 或 block
+            nominee_id = int(parts[3])
             
-            vote_type = parts[1]  # positive 或 negative
-            target_id = int(parts[2])
+            # 存储多选模式的状态
+            context.user_data["multi_select"] = {
+                "tag_type": tag_type,
+                "nominee_id": nominee_id,
+                "selected_tags": []
+            }
             
-            # 检查是否自评
-            if user_id == target_id:
-                await query.answer("无法评价自己", show_alert=True)
-                return
+            # 获取该类型的所有标签
+            tags = await get_tags_by_type(tag_type)
             
-            # 检查每日投票限制
-            async with db_transaction() as conn:
-                # 获取每日投票限制设置
-                settings = await conn.fetchrow("SELECT value FROM settings WHERE key = 'max_daily_votes'")
-                max_daily_votes = int(settings['value']) if settings else 10
+            # 创建标签选择按钮，带有选中状态
+            keyboard = []
+            for i, tag in enumerate(tags):
+                if i % 2 == 0:
+                    keyboard.append([])
                 
-                # 检查今日已投票数量
-                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-                today_votes = await conn.fetchval(
-                    """
-                    SELECT COUNT(*) FROM reputations 
-                    WHERE user_id = $1 AND created_at >= $2
-                    """, 
-                    user_id, today_start
-                )
-                
-                # 检查是否已经评价过此用户
-                existing_vote = await conn.fetchval(
-                    "SELECT id FROM reputations WHERE user_id = $1 AND target_id = $2",
-                    user_id, target_id
-                )
-                
-                if existing_vote:
-                    await query.answer("您已经评价过该用户", show_alert=True)
-                    return
-                
-                if today_votes >= max_daily_votes and not existing_vote:
-                    await query.answer(f"您今日的评价次数已达上限({max_daily_votes}次)", show_alert=True)
-                    return
+                # 标记为未选中
+                keyboard[-1].append(InlineKeyboardButton(
+                    f"◻️ {tag['content']}", 
+                    callback_data=f"tag_select_{tag_type}_{nominee_id}_{tag['id']}"
+                ))
             
-            # 进入评价标签选择流程
-            is_positive = (vote_type == "positive")
-            tag_type = "recommend" if is_positive else "block"
+            # 确认和取消按钮
+            keyboard.append([
+                InlineKeyboardButton("✅ 确认", callback_data=f"tag_confirm_{tag_type}_{nominee_id}"),
+                InlineKeyboardButton("❌ 取消", callback_data=f"rep_summary_{nominee_id}")
+            ])
             
-            # 获取可用标签
-            async with db_transaction() as conn:
-                tags = await conn.fetch(
-                    "SELECT id, name FROM tags WHERE tag_type = $1 ORDER BY name",
-                    tag_type
-                )
-            
-            # 如果没有标签，先通知用户
-            if not tags:
-                await query.answer(f"当前没有可用的{'好评' if is_positive else '差评'}标签", show_alert=True)
-                return
-            
-            # 创建标签选择按钮
-            buttons = []
-            current_row = []
-            
-            for tag in tags:
-                tag_btn = InlineKeyboardButton(tag['name'], callback_data=f"tag_{tag['id']}_{target_id}_{is_positive}")
-                current_row.append(tag_btn)
-                
-                if len(current_row) == 2:  # 每行两个按钮
-                    buttons.append(current_row.copy())
-                    current_row = []
-            
-            if current_row:  # 处理剩余按钮
-                buttons.append(current_row)
-            
-            # 添加取消按钮
-            buttons.append([InlineKeyboardButton("取消", callback_data="noop")])
-            
-            # 更新消息
-            tag_type_text = "好评" if is_positive else "差评"
+            reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
-                f"您正在给 @{await get_username(target_id)} 添加{tag_type_text}，请选择一个标签：",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                f"请选择多个{'👍 好评' if tag_type == 'recommend' else '👎 差评'}标签，然后点击确认:", 
+                reply_markup=reply_markup
             )
-            await query.answer()
-            
-        elif data.startswith("tag_"):
-            # 处理标签选择
-            parts = data.split("_")
-            if len(parts) != 4:
-                await query.answer("无效的操作", show_alert=True)
-                return
-            
-            tag_id = int(parts[1])
-            target_id = int(parts[2])
-            is_positive = parts[3].lower() == "true"
-            
-            # 创建评价记录
-            async with db_transaction() as conn:
-                # 创建评价
-                reputation_id = await conn.fetchval(
-                    """
-                    INSERT INTO reputations (user_id, target_id, is_positive)
-                    VALUES ($1, $2, $3)
-                    RETURNING id
-                    """,
-                    user_id, target_id, is_positive
-                )
-                
-                # 添加标签关联
-                await conn.execute(
-                    """
-                    INSERT INTO reputation_tags (reputation_id, tag_id)
-                    VALUES ($1, $2)
-                    """,
-                    reputation_id, tag_id
-                )
-            
-            # 清除缓存
-            if target_id in reputation_cache:
-                del reputation_cache[target_id]
-            
-            # 获取更新后的声誉信息
-            target_username = await get_username(target_id)
-            reputation_data = await get_reputation_summary(target_id, target_username)
-            text, keyboard = create_reputation_message(reputation_data, target_id)
-            
-            # 更新消息
-            await query.edit_message_text(
-                text=text,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-            
-            await query.answer("评价已添加", show_alert=True)
-    
-    except Exception as e:
-        logger.error(f"处理按钮时发生错误: {e}", exc_info=True)
-        await query.answer("操作失败，请稍后再试", show_alert=True)
-
-async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示用户声誉摘要信息"""
-    query = update.callback_query
-    data = query.data
-    parts = data.split("_")
-    
-    if len(parts) < 3:
-        await query.answer("无效的请求", show_alert=True)
-        return
-    
-    target_id = int(parts[2])
-    target_username = await get_username(target_id)
-    
-    # 更新用户活动
-    await update_user_activity(update.effective_user.id, update.effective_user.username)
-    
-    # 获取声誉数据
-    reputation_data = await get_reputation_summary(target_id, target_username)
-    text, keyboard = create_reputation_message(reputation_data, target_id)
-    
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-    await query.answer()
-
-async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示用户声誉详细信息"""
-    query = update.callback_query
-    data = query.data
-    parts = data.split("_")
-    
-    if len(parts) < 3:
-        await query.answer("无效的请求", show_alert=True)
-        return
-    
-    target_id = int(parts[2])
-    user_id = update.effective_user.id
-    
-    # 更新用户活动
-    await update_user_activity(user_id, update.effective_user.username)
-    
-    # 获取用户名
-    target_username = await get_username(target_id)
-    
-    # 获取详细评价数据
-    async with db_transaction() as conn:
-        # 获取好评和差评的详细标签分布
-        positive_tags = await conn.fetch("""
-            SELECT t.name, COUNT(*) as count
-            FROM reputation_tags rt
-            JOIN reputations r ON rt.reputation_id = r.id
-            JOIN tags t ON rt.tag_id = t.id
-            WHERE r.target_id = $1 AND r.is_positive = TRUE
-            GROUP BY t.name
-            ORDER BY count DESC
-        """, target_id)
+            return
         
-        negative_tags = await conn.fetch("""
-            SELECT t.name, COUNT(*) as count
-            FROM reputation_tags rt
-            JOIN reputations r ON rt.reputation_id = r.id
-            JOIN tags t ON rt.tag_id = t.id
-            WHERE r.target_id = $1 AND r.is_positive = FALSE
-            GROUP BY t.name
-            ORDER BY count DESC
-        """, target_id)
-        
-        # 获取最近的评价
-        recent_ratings = await conn.fetch("""
-            SELECT 
-                r.is_positive,
-                t.name as tag_name,
-                r.created_at
-            FROM 
-                reputations r
-            JOIN 
-                reputation_tags rt ON r.id = rt.reputation_id
-            JOIN 
-                tags t ON rt.tag_id = t.id
-            WHERE 
-                r.target_id = $1
-            ORDER BY 
-                r.created_at DESC
-            LIMIT 5
-        """, target_id)
-    
-    # 构建详细信息文本
-    text = f"🔍 **{target_username}** 的详细声誉分析\n\n"
-    
-    # 添加好评标签分布
-    if positive_tags:
-        text += "**好评标签分布:**\n"
-        for tag in positive_tags:
-            text += f"• #{tag['name']}: {tag['count']}次\n"
-        text += "\n"
-    else:
-        text += "**好评标签:** 暂无\n\n"
-    
-    # 添加差评标签分布
-    if negative_tags:
-        text += "**差评标签分布:**\n"
-        for tag in negative_tags:
-            text += f"• #{tag['name']}: {tag['count']}次\n"
-        text += "\n"
-    else:
-        text += "**差评标签:** 暂无\n\n"
-    
-    # 添加最近评价
-    if recent_ratings:
-        text += "**最近评价:**\n"
-        for rating in recent_ratings:
-            date_str = rating['created_at'].strftime("%Y-%m-%d")
-            vote_type = "👍" if rating['is_positive'] else "👎"
-            text += f"• {date_str}: {vote_type} #{rating['tag_name']}\n"
-    else:
-        text += "**最近评价:** 暂无\n"
-    
-    # 构建按钮
-    keyboard = [
-        [InlineKeyboardButton("返回摘要", callback_data=f"rep_summary_{target_id}")],
-        [InlineKeyboardButton("返回主菜单", callback_data="back_to_help")]
-    ]
-    
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-    await query.answer()
-
-async def show_voters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示查看评价者的菜单"""
-    query = update.callback_query
-    data = query.data
-    parts = data.split("_")
-    
-    if len(parts) < 3:
-        await query.answer("无效的请求", show_alert=True)
-        return
-    
-    target_id = int(parts[3])
-    target_username = await get_username(target_id)
-    
-    # 构建菜单
-    text = f"👥 选择要查看的 **{target_username}** 的评价者列表："
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("👍 好评者", callback_data=f"rep_voters_positive_{target_id}"),
-            InlineKeyboardButton("👎 差评者", callback_data=f"rep_voters_negative_{target_id}")
-        ],
-        [
-            InlineKeyboardButton("返回摘要", callback_data=f"rep_summary_{target_id}")
-        ]
-    ]
-    
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-    await query.answer()
-
-async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示对用户进行评价的用户列表"""
-    query = update.callback_query
-    data = query.data
-    parts = data.split("_")
-    
-    if len(parts) < 4:
-        await query.answer("无效的请求", show_alert=True)
-        return
-    
-    vote_type = parts[2]  # positive 或 negative
-    target_id = int(parts[3])
-    is_positive = vote_type == "positive"
-    
-    target_username = await get_username(target_id)
-    
-    # 获取评价者列表
-    async with db_transaction() as conn:
-        voters = await conn.fetch("""
-            SELECT 
-                r.user_id,
-                u.username,
-                t.name as tag_name,
-                r.created_at
-            FROM 
-                reputations r
-            JOIN 
-                users u ON r.user_id = u.id
-            JOIN 
-                reputation_tags rt ON r.id = rt.reputation_id
-            JOIN 
-                tags t ON rt.tag_id = t.id
-            WHERE 
-                r.target_id = $1 AND r.is_positive = $2
-            ORDER BY 
-                r.created_at DESC
-        """, target_id, is_positive)
-    
-    # 构建评价者列表文本
-    vote_type_text = "好评" if is_positive else "差评"
-    text = f"👥 给 **{target_username}** 的{vote_type_text}者 (共{len(voters)}人)\n\n"
-    
-    if voters:
-        for i, voter in enumerate(voters, 1):
-            date_str = voter['created_at'].strftime("%Y-%m-%d")
-            username = voter['username'] or f"用户{voter['user_id']}"
-            text += f"{i}. @{username} - #{voter['tag_name']} ({date_str})\n"
-    else:
-        text += f"暂无{vote_type_text}记录"
-    
-    # 构建按钮
-    keyboard = [
-        [InlineKeyboardButton("返回", callback_data=f"rep_voters_menu_{target_id}")],
-        [InlineKeyboardButton("返回摘要", callback_data=f"rep_summary_{target_id}")]
-    ]
-    
-    await query.edit_message_text(
-        text=text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-    await query.answer()
-
-async def get_username(user_id):
-    """获取用户名，如果不存在则返回占位符"""
-    async with db_transaction() as conn:
-        result = await conn.fetchrow("SELECT username FROM users WHERE id = $1", user_id)
-        return result['username'] if result and result['username'] else f"用户{user_id}"
+        # 处理多选模式下的标签选择
+        elif parts[1] == "select":
