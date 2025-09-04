@@ -66,7 +66,8 @@ async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 更新用户活动
     await update_user_activity(update.effective_user.id, update.effective_user.username)
     
-    text = "🔥 **箴言熔炉 (The Forge)** 🔥\n\n"在此，你锻造构成神谕的箴言""
+    # 修正这一行 - 使用正确的引号格式
+    text = "🔥 **箴言熔炉 (The Forge)** 🔥\n\n\"在此，你锻造构成神谕的箴言\""
     keyboard = [
         [InlineKeyboardButton("➕ 锻造赞誉箴言", callback_data="admin_tags_add_recommend_prompt")],
         [InlineKeyboardButton("➕ 锻造警示箴言", callback_data="admin_tags_add_block_prompt")],
@@ -185,7 +186,8 @@ async def permissions_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 更新用户活动
     await update_user_activity(update.effective_user.id, update.effective_user.username)
     
-    text = "🛡️ **守护者圣殿 (The Sanctum)** 🛡️\n\n"分封或罢黜你的守护者""
+    # 修正这一行 - 使用正确的引号格式
+    text = "🛡️ **守护者圣殿 (The Sanctum)** 🛡️\n\n\"分封或罢黜你的守护者\""
     keyboard = [
         [InlineKeyboardButton("➕ 分封守护者", callback_data="admin_perms_add_prompt")],
         [InlineKeyboardButton("🗑️ 罢黜守护者", callback_data="admin_perms_remove_menu")],
@@ -283,7 +285,7 @@ async def system_settings_panel(update: Update, context: ContextTypes.DEFAULT_TY
     max_prayers = int(settings_dict.get('max_prayers_per_day', '3'))
     prayer_cooldown = int(settings_dict.get('prayer_cooldown', '3600'))
     
-    text = (f"⚙️ **法则律典 (The Codex)** ⚙️\n\n"调整世界的基础规则"\n\n"
+    text = (f"⚙️ **法则律典 (The Codex)** ⚙️\n\n\"调整世界的基础规则\"\n\n"
             f"▶️ **现行法则:**\n"
             f"  - 镜像缓存时间: `{ttl}` 秒\n"
             f"  - 每日最大祷告次数: `{max_prayers}` 次\n"
