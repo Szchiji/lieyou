@@ -281,19 +281,13 @@ async def system_settings_panel(update: Update, context: ContextTypes.DEFAULT_TY
     
     # 获取各项设置，如果不存在则使用默认值
     ttl = int(settings_dict.get('leaderboard_cache_ttl', '300'))
-    max_prayers = int(settings_dict.get('max_prayers_per_day', '3'))
-    prayer_cooldown = int(settings_dict.get('prayer_cooldown', '3600'))
     
     text = (f"⚙️ **法则律典 (The Codex)** ⚙️\n\n\"调整世界的基础规则\"\n\n"
             f"▶️ **现行法则:**\n"
-            f"  - 镜像缓存时间: `{ttl}` 秒\n"
-            f"  - 每日最大祷告次数: `{max_prayers}` 次\n"
-            f"  - 祷告冷却时间: `{prayer_cooldown}` 秒\n")
+            f"  - 镜像缓存时间: `{ttl}` 秒\n")
     
     keyboard = [
         [InlineKeyboardButton("⚙️ 调整缓存法则", callback_data="admin_system_set_prompt_leaderboard_cache_ttl")],
-        [InlineKeyboardButton("⚙️ 调整祷告次数", callback_data="admin_system_set_prompt_max_prayers_per_day")],
-        [InlineKeyboardButton("⚙️ 调整祷告冷却", callback_data="admin_system_set_prompt_prayer_cooldown")],
         [InlineKeyboardButton("⬅️ 返回枢纽", callback_data="admin_settings_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -308,8 +302,6 @@ async def set_setting_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # 不同设置的提示文本
     prompts = {
         'leaderboard_cache_ttl': '✍️ **调整缓存法则**\n\n请输入新的镜像缓存秒数 (纯数字)。\n(例如: 600 代表10分钟)\n\n发送 /cancel 可取消。',
-        'max_prayers_per_day': '✍️ **调整祷告次数**\n\n请输入用户每日最大祷告次数 (纯数字)。\n(例如: 5)\n\n发送 /cancel 可取消。',
-        'prayer_cooldown': '✍️ **调整祷告冷却**\n\n请输入祷告间隔冷却时间，以秒为单位 (纯数字)。\n(例如: 1800 代表30分钟)\n\n发送 /cancel 可取消。'
     }
     
     text = prompts.get(setting_key, "未知的法则项。")
