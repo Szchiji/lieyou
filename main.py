@@ -12,7 +12,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
     ContextTypes,
-    RegexHandler
 )
 from telegram.error import TimedOut, BadRequest
 from fastapi import FastAPI, Request, Response
@@ -163,12 +162,11 @@ ptb_app.add_handler(MessageHandler(
     handle_username_query
 ))
 
+# 用 MessageHandler 替代已不支持的 RegexHandler
 # 原有的直接@用户功能 - 仅在群聊中
-nomination_pattern = r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))'
-ptb_app.add_handler(RegexHandler(
-    nomination_pattern,
-    handle_nomination,
-    filters=~filters.COMMAND & filters.ChatType.GROUPS
+ptb_app.add_handler(MessageHandler(
+    filters.Regex(r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))') & ~filters.COMMAND & filters.ChatType.GROUPS,
+    handle_nomination
 ))
 
 @asynccontextmanager
