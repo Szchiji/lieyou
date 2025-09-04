@@ -28,11 +28,26 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     username = username_match.group(1)
     
-    # 查找目标用户
+    # 查找目标用户，如果不存在则创建虚拟用户记录
     target_user = await get_user_by_username(username)
     if not target_user:
-        await update.message.reply_text(f"🔍 未找到用户 @{username}，该用户可能未使用过本机器人。")
-        return
+        # 创建虚拟用户记录，使用用户名生成稳定的ID
+        virtual_user_id = abs(hash(username)) % (2**31 - 1) + 1000000  # 确保是正数且不与真实用户ID冲突
+        
+        # 创建虚拟用户记录
+        try:
+            await db_execute(
+                "INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+                virtual_user_id, username, f"@{username}"
+            )
+            target_user = {'id': virtual_user_id, 'username': username, 'first_name': f"@{username}"}
+        except Exception as e:
+            logger.error(f"创建虚拟用户失败: {e}")
+            # 如果创建失败，尝试使用现有记录
+            target_user = await get_user_by_username(username)
+            if not target_user:
+                await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
+                return
     
     # 检查是否是自己
     if target_user['id'] == user_id:
@@ -57,11 +72,24 @@ async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     username = username_match.group(1)
     
-    # 查找目标用户
+    # 查找目标用户，如果不存在则创建虚拟用户记录
     target_user = await get_user_by_username(username)
     if not target_user:
-        await update.message.reply_text(f"🔍 未找到用户 @{username}，该用户可能未使用过本机器人。")
-        return
+        # 创建虚拟用户记录
+        virtual_user_id = abs(hash(username)) % (2**31 - 1) + 1000000
+        
+        try:
+            await db_execute(
+                "INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
+                virtual_user_id, username, f"@{username}"
+            )
+            target_user = {'id': virtual_user_id, 'username': username, 'first_name': f"@{username}"}
+        except Exception as e:
+            logger.error(f"创建虚拟用户失败: {e}")
+            target_user = await get_user_by_username(username)
+            if not target_user:
+                await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
+                return
     
     # 检查是否是自己
     if target_user['id'] == user_id:
@@ -116,37 +144,52 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
         reputation_score = 0
     
     # 构建显示名称
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
+    username = target_user['username']
+    # 去掉@前缀如果存在
+    if username and username.startswith('@'):
+        username = username[1:]
+    
+    display_name = target_user['first_name'] or f"@{username}" if username else f"用户{target_id}"
     
     # 生成声誉描述
     if total_votes == 0:
-        reputation_desc = "🆕 新用户，暂无评价"
-        reputation_icon = "❓"
+        reputation_desc = "中立 (0)"
+        reputation_icon = "⚖️"
     elif reputation_score >= 90:
-        reputation_desc = f"⭐ 极佳声誉 ({reputation_score}%)"
+        reputation_desc = f"极佳声誉 ({reputation_score}%)"
         reputation_icon = "🌟"
     elif reputation_score >= 75:
-        reputation_desc = f"👍 良好声誉 ({reputation_score}%)"
+        reputation_desc = f"良好声誉 ({reputation_score}%)"
         reputation_icon = "✅"
     elif reputation_score >= 60:
-        reputation_desc = f"📊 一般声誉 ({reputation_score}%)"
+        reputation_desc = f"一般声誉 ({reputation_score}%)"
         reputation_icon = "⚖️"
     elif reputation_score >= 40:
-        reputation_desc = f"⚠️ 较差声誉 ({reputation_score}%)"
+        reputation_desc = f"较差声誉 ({reputation_score}%)"
         reputation_icon = "⚠️"
     else:
-        reputation_desc = f"❌ 负面声誉 ({reputation_score}%)"
+        reputation_desc = f"负面声誉 ({reputation_score}%)"
         reputation_icon = "💀"
     
-    # 获取随机箴言
+    # 获取随机便签
     motto = await get_random_motto()
     motto_text = f"\n\n💭 *{motto}*" if motto else ""
     
-    # 构建消息
-    message = f"{reputation_icon} **{display_name}** 的神谕之卷\n\n"
-    message += f"🎯 {reputation_desc}\n"
-    message += f"📊 总评价: {total_votes} 票 (👍{positive_votes} / 👎{negative_votes})\n"
-    message += f"👥 评价人数: {unique_voters} 人"
+    # 使用您喜欢的框格式
+    clean_username = username if username else display_name
+    # 截断过长的用户名
+    if len(clean_username) > 15:
+        clean_username = clean_username[:12] + "..."
+    
+    message = f"┏━━━━「 📜 神谕之卷 」━━━━┓\n"
+    message += f"┃                          ┃\n"
+    message += f"┃  👤 求问对象: @{clean_username}   ┃\n"
+    message += f"┃                          ┃\n"
+    message += f"┃  👍 赞誉: {positive_votes} 次        ┃\n"
+    message += f"┃  👎 警示: {negative_votes} 次        ┃\n"
+    message += f"┃  {reputation_icon} 神谕判定: {reputation_desc}  ┃\n"
+    message += f"┃                          ┃\n"
+    message += f"┗━━━━━━━━━━━━━━━━━━┛"
     message += motto_text
     
     # 构建按钮
@@ -159,7 +202,7 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
             InlineKeyboardButton("👥 评价者", callback_data=f"rep_voters_menu_{target_id}_1")
         ])
     
-    # 功能按钮行2 - 只有在私聊或者从查询来的时候显示评价和收藏按钮
+    # 功能按钮行2 - 评价和收藏按钮
     current_user_id = update.effective_user.id
     if target_id != current_user_id:
         action_buttons = []
