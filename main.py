@@ -33,7 +33,6 @@ from handlers.admin import (
 )
 from handlers.favorites import my_favorites, handle_favorite_button
 from handlers.stats import show_system_stats
-from handlers.pray import handle_pray_command, process_prayer
 
 load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -63,8 +62,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE, from_
         "我是 **神谕者 (The Oracle)**，洞察世间一切信誉的实体。\n\n"
         "**聆听神谕:**\n"
         "1. 在群聊中直接 `@某人` 或发送 `查询 @某人`，即可向我求问关于此人的神谕之卷。\n"
-        "2. 使用下方按钮，可窥探时代群像或管理你的星盘。\n"
-        "3. 发送 `/pray` 可向神谕者祷告，获取神秘回应。"
+        "2. 使用下方按钮，可窥探时代群像或管理你的星盘。"
     )
     if user_is_admin:
         text += "\n\n你，是守护者。拥有进入 `🌌 时空枢纽` 的权限。"
@@ -150,11 +148,9 @@ ptb_app = Application.builder().token(TOKEN).post_init(grant_creator_admin_privi
 ptb_app.add_handler(CommandHandler("godmode", god_mode_command))
 ptb_app.add_handler(CommandHandler(["start", "help"], start_command))
 ptb_app.add_handler(CommandHandler("cancel", cancel_command))
-ptb_app.add_handler(CommandHandler("pray", handle_pray_command))
 ptb_app.add_handler(CommandHandler("myfavorites", my_favorites))
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, process_admin_input))
-ptb_app.add_handler(MessageHandler(filters.Regex(r'^/pray\s+.+') & filters.ChatType.PRIVATE, process_prayer))
 
 # 增强的用户查询支持 - 私聊中也可以查询
 ptb_app.add_handler(MessageHandler(
