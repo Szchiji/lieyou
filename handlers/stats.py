@@ -1,123 +1,242 @@
 import logging
+import asyncio
+from datetime import datetime, timedelta
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from database import get_system_stats, update_user_activity, db_transaction
-from datetime import datetime
+
+from database import db_fetch_all, db_fetch_one
 
 logger = logging.getLogger(__name__)
 
 async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示系统统计数据"""
-    user_id = update.effective_user.id
+    """显示系统统计信息"""
+    callback_query = update.callback_query
     
-    # 更新用户活动记录
-    await update_user_activity(user_id, update.effective_user.username)
-    
-    # 检查votes表结构，确保有必要的列
-    async with db_transaction() as conn:
-        try:
-            columns = await conn.fetch("""
-                SELECT column_name FROM information_schema.columns 
-                WHERE table_name = 'votes' AND column_name IN ('vote_type', 'created_at')
-            """)
-            column_names = [col['column_name'] for col in columns]
-            
-            # 如果缺少必要的列，添加它们
-            if 'vote_type' not in column_names:
-                await conn.execute("ALTER TABLE votes ADD COLUMN vote_type TEXT NOT NULL DEFAULT 'recommend';")
-                logger.info("✅ 添加了'vote_type'列到votes表")
-                
-            if 'created_at' not in column_names:
-                await conn.execute("ALTER TABLE votes ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;")
-                logger.info("✅ 添加了'created_at'列到votes表")
-        except Exception as e:
-            logger.error(f"检查votes表结构失败: {e}", exc_info=True)
+    # 如果是从按钮调用的，先回答回调查询
+    if callback_query:
+        await callback_query.answer()
+        message = callback_query.message
+    else:
+        message = update.message
     
     try:
-        # 获取基本统计数据
-        async with db_transaction() as conn:
-            stats = {}
-            
-            # 总用户数
-            stats['total_users'] = await conn.fetchval("SELECT COUNT(*) FROM users")
-            
-            # 总档案数
-            stats['total_profiles'] = await conn.fetchval("SELECT COUNT(*) FROM reputation_profiles")
-            
-            # 总投票数
-            stats['total_votes'] = await conn.fetchval("SELECT COUNT(*) FROM votes")
-            
-            # 标签数量
-            stats['recommend_tags'] = await conn.fetchval("SELECT COUNT(*) FROM tags WHERE type = 'recommend'")
-            stats['block_tags'] = await conn.fetchval("SELECT COUNT(*) FROM tags WHERE type = 'block'")
-            
-            # 今日活跃统计
-            today = datetime.now().date()
-            has_created_at = 'created_at' in [col['column_name'] for col in columns] if 'columns' in locals() else False
-            
-            if has_created_at:
-                stats['today_votes'] = await conn.fetchval(
-                    "SELECT COUNT(*) FROM votes WHERE DATE(created_at) = $1", 
-                    today
-                )
-            else:
-                stats['today_votes'] = 0
-            
-            # 最活跃用户
-            most_active = await conn.fetch("""
-                SELECT nominee_username, COUNT(*) as vote_count 
-                FROM votes 
-                GROUP BY nominee_username 
-                ORDER BY vote_count DESC 
-                LIMIT 1
-            """)
-            stats['most_active_user'] = most_active[0]['nominee_username'] if most_active else None
+        # 开始查询统计数据前显示加载消息
+        loading_message = await message.reply_text("🔄 正在收集神谕数据，请稍候...")
         
-        # 当前时间
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 异步查询所有统计数据
+        stats = await asyncio.gather(
+            get_user_stats(),
+            get_reputation_stats(),
+            get_tag_stats(),
+            get_vote_time_stats(),
+            get_top_tags()
+        )
+        
+        user_stats, rep_stats, tag_stats, time_stats, top_tags = stats
         
         # 构建统计信息文本
-        text_parts = [
-            "┏━━━━「 📊 <b>神谕数据</b> 」━━━━┓",
-            "┃                          ┃",
-            f"┃  ⏰ <b>时间印记:</b> {current_time[:10]}  ┃",
-            "┃                          ┃",
-            f"┃  👥 <b>用户数据:</b>            ┃",
-            f"┃  - 总用户数: {stats['total_users']} 位求道者    ┃",
-            f"┃  - 总档案数: {stats['total_profiles']} 份神谕之卷   ┃",
-            "┃                          ┃",
-            f"┃  ⚖️ <b>审判数据:</b>            ┃",
-            f"┃  - 累计审判: {stats['total_votes']} 次        ┃",
-            f"┃  - 今日审判: {stats.get('today_votes', 0)} 次        ┃",
-            "┃                          ┃",
-            f"┃  📜 <b>箴言数据:</b>            ┃",
-            f"┃  - 赞誉箴言: {stats['recommend_tags']} 种        ┃",
-            f"┃  - 警示箴言: {stats['block_tags']} 种        ┃",
-        ]
+        text = (
+            f"📊 **神谕数据概览**\n\n"
+            f"👥 **用户数据**\n"
+            f"总用户数: {user_stats['total_users']}\n"
+            f"管理员数: {user_stats['admin_count']}\n\n"
+            
+            f"⭐ **评价数据**\n"
+            f"总评价数: {rep_stats['total_votes']}\n"
+            f"正面评价: {rep_stats['positive_votes']} ({rep_stats['positive_percentage']}%)\n"
+            f"负面评价: {rep_stats['negative_votes']} ({rep_stats['negative_percentage']}%)\n\n"
+            
+            f"🏷️ **标签数据**\n"
+            f"推荐标签数: {tag_stats['recommend_tags']}\n"
+            f"警告标签数: {tag_stats['block_tags']}\n"
+            f"箴言数量: {tag_stats['quote_tags']}\n\n"
+            
+            f"⏱️ **时间分析**\n"
+            f"过去24小时新增评价: {time_stats['last_24h']}\n"
+            f"过去7天新增评价: {time_stats['last_7d']}\n"
+            f"过去30天新增评价: {time_stats['last_30d']}\n\n"
+            
+            f"🔝 **热门标签** (使用次数)\n"
+        )
         
-        # 如果有最活跃用户，添加到统计中
-        if stats.get('most_active_user'):
-            text_parts.extend([
-                "┃                          ┃",
-                f"┃  🌟 <b>最活跃存在:</b> @{stats['most_active_user']}  ┃",
-            ])
+        # 添加热门标签
+        for i, (tag_type, content, count) in enumerate(top_tags, 1):
+            type_emoji = "👍" if tag_type == "recommend" else "👎"
+            text += f"{i}. {type_emoji} {content}: {count}次\n"
         
-        text_parts.append("┗━━━━━━━━━━━━━━━━━━┛")
-        text = "\n".join(text_parts)
+        # 返回按钮
+        keyboard = [[InlineKeyboardButton("« 返回", callback_data="back_to_help")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # 编辑或发送统计信息
+        if callback_query:
+            await callback_query.edit_message_text(
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        else:
+            await message.reply_text(
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+        
+        # 删除加载消息
+        await loading_message.delete()
         
     except Exception as e:
         logger.error(f"获取统计数据失败: {e}", exc_info=True)
-        text = "⚠️ <b>获取神谕数据时遇到问题</b>\n\n系统正在维护中，请稍后再试。"
-    
-    # 创建按钮
-    keyboard = [
-        [InlineKeyboardButton("🔄 刷新数据", callback_data="show_system_stats")],
-        [InlineKeyboardButton("🌍 返回凡界", callback_data="back_to_help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # 发送或更新消息
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='HTML')
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='HTML')
+        error_text = "❌ 收集神谕数据时遇到问题，请稍后再试。"
+        if callback_query:
+            await callback_query.edit_message_text(text=error_text)
+        else:
+            await message.reply_text(text=error_text)
+
+async def get_user_stats():
+    """获取用户统计数据"""
+    try:
+        # 获取总用户数
+        total_users_query = "SELECT COUNT(*) FROM users"
+        total_users = await db_fetch_one(total_users_query)
+        
+        # 获取管理员数量
+        admin_count_query = "SELECT COUNT(*) FROM users WHERE is_admin = TRUE"
+        admin_count = await db_fetch_one(admin_count_query)
+        
+        return {
+            "total_users": total_users[0],
+            "admin_count": admin_count[0]
+        }
+    except Exception as e:
+        logger.error(f"获取用户统计数据失败: {e}")
+        return {
+            "total_users": 0,
+            "admin_count": 0
+        }
+
+async def get_reputation_stats():
+    """获取声誉评价统计数据"""
+    try:
+        # 获取总评价数
+        total_votes_query = "SELECT COUNT(*) FROM reputation"
+        total_votes = await db_fetch_one(total_votes_query)
+        total_votes = total_votes[0] if total_votes else 0
+        
+        # 获取正面评价数
+        positive_votes_query = "SELECT COUNT(*) FROM reputation WHERE is_positive = TRUE"
+        positive_votes = await db_fetch_one(positive_votes_query)
+        positive_votes = positive_votes[0] if positive_votes else 0
+        
+        # 获取负面评价数
+        negative_votes_query = "SELECT COUNT(*) FROM reputation WHERE is_positive = FALSE"
+        negative_votes = await db_fetch_one(negative_votes_query)
+        negative_votes = negative_votes[0] if negative_votes else 0
+        
+        # 计算百分比
+        positive_percentage = round((positive_votes / total_votes) * 100) if total_votes > 0 else 0
+        negative_percentage = round((negative_votes / total_votes) * 100) if total_votes > 0 else 0
+        
+        return {
+            "total_votes": total_votes,
+            "positive_votes": positive_votes,
+            "negative_votes": negative_votes,
+            "positive_percentage": positive_percentage,
+            "negative_percentage": negative_percentage
+        }
+    except Exception as e:
+        logger.error(f"获取评价统计数据失败: {e}")
+        return {
+            "total_votes": 0,
+            "positive_votes": 0,
+            "negative_votes": 0,
+            "positive_percentage": 0,
+            "negative_percentage": 0
+        }
+
+async def get_tag_stats():
+    """获取标签统计数据"""
+    try:
+        # 获取推荐标签数量
+        recommend_query = "SELECT COUNT(*) FROM tags WHERE tag_type = 'recommend'"
+        recommend_count = await db_fetch_one(recommend_query)
+        
+        # 获取警告标签数量
+        block_query = "SELECT COUNT(*) FROM tags WHERE tag_type = 'block'"
+        block_count = await db_fetch_one(block_query)
+        
+        # 获取箴言数量
+        quote_query = "SELECT COUNT(*) FROM tags WHERE tag_type = 'quote'"
+        quote_count = await db_fetch_one(quote_query)
+        
+        return {
+            "recommend_tags": recommend_count[0] if recommend_count else 0,
+            "block_tags": block_count[0] if block_count else 0,
+            "quote_tags": quote_count[0] if quote_count else 0
+        }
+    except Exception as e:
+        logger.error(f"获取标签统计数据失败: {e}")
+        return {
+            "recommend_tags": 0,
+            "block_tags": 0,
+            "quote_tags": 0
+        }
+
+async def get_vote_time_stats():
+    """获取不同时间段的评价统计"""
+    try:
+        now = datetime.now()
+        
+        # 过去24小时
+        last_24h_query = """
+        SELECT COUNT(*) FROM reputation 
+        WHERE created_at > $1
+        """
+        last_24h = await db_fetch_one(last_24h_query, now - timedelta(days=1))
+        
+        # 过去7天
+        last_7d_query = """
+        SELECT COUNT(*) FROM reputation 
+        WHERE created_at > $1
+        """
+        last_7d = await db_fetch_one(last_7d_query, now - timedelta(days=7))
+        
+        # 过去30天
+        last_30d_query = """
+        SELECT COUNT(*) FROM reputation 
+        WHERE created_at > $1
+        """
+        last_30d = await db_fetch_one(last_30d_query, now - timedelta(days=30))
+        
+        return {
+            "last_24h": last_24h[0] if last_24h else 0,
+            "last_7d": last_7d[0] if last_7d else 0,
+            "last_30d": last_30d[0] if last_30d else 0
+        }
+    except Exception as e:
+        logger.error(f"获取时间段统计数据失败: {e}")
+        return {
+            "last_24h": 0,
+            "last_7d": 0,
+            "last_30d": 0
+        }
+
+async def get_top_tags():
+    """获取使用最多的标签"""
+    try:
+        query = """
+        SELECT t.tag_type, t.content, COUNT(*) as usage_count
+        FROM reputation r
+        JOIN tags t ON r.tag_id = t.id
+        GROUP BY t.tag_type, t.content
+        ORDER BY usage_count DESC
+        LIMIT 5
+        """
+        result = await db_fetch_all(query)
+        
+        # 将结果转换为列表格式
+        return [(row['tag_type'], row['content'], row['usage_count']) for row in result]
+    except Exception as e:
+        logger.error(f"获取热门标签数据失败: {e}")
+        return []
