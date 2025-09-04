@@ -113,7 +113,7 @@ async def create_tables():
                     target_id BIGINT REFERENCES users(id),
                     voter_id BIGINT REFERENCES users(id),
                     is_positive BOOLEAN NOT NULL,
-                    tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+                    tag_ids INTEGER[] DEFAULT '{}',
                     comment TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     UNIQUE(target_id, voter_id)
@@ -181,7 +181,10 @@ async def create_tables():
                 "信誉如金，一言九鼎。",
                 "德行天下，人心自明。",
                 "慎言慎行，方得人心。",
-                "诚以待人，信以立身。"
+                "诚以待人，信以立身。",
+                "君子坦荡荡，小人长戚戚。",
+                "己所不欲，勿施于人。",
+                "言必信，行必果。"
             ]
             
             for motto in default_mottos:
