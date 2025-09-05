@@ -78,7 +78,6 @@ async def update_user_activity(user_id: int, username: str = None, first_name: s
 async def create_tables():
     """创建并迁移数据库表"""
     async with db_pool.acquire() as conn:
-        # 步骤 1: 创建所有表和新列（如果它们不存在）
         logger.info("步骤 1: 确保所有表都存在...")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -99,18 +98,21 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+        
+        # FINAL FIX: Changed tag_ids to tag_id to match all other files.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS reputations (
                 id SERIAL PRIMARY KEY,
                 target_id BIGINT NOT NULL,
                 voter_id BIGINT NOT NULL,
                 is_positive BOOLEAN NOT NULL,
-                tag_ids INTEGER[],
+                tag_id INTEGER[],
                 comment TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 UNIQUE(target_id, voter_id)
             )
         """)
+        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
                 id SERIAL PRIMARY KEY,
@@ -128,7 +130,6 @@ async def create_tables():
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        # 已移除 mottos 表的创建
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS erasure_records (
                 id SERIAL PRIMARY KEY,
@@ -138,22 +139,19 @@ async def create_tables():
             )
         """)
 
-        # 步骤 2: 执行数据迁移（如果需要）
-        logger.info("步骤 2: 执行数据迁移（如果需要）...")
-        # ... (迁移逻辑保持不变)
+        logger.info("步骤 2: 正在检查并执行列迁移...")
+        # Add a new column with the correct name if the old one exists
+        if await db_fetchval("SELECT 1 FROM information_schema.columns WHERE table_name='reputations' AND column_name='tag_ids'"):
+            logger.info("发现旧的 'tag_ids' 列，准备迁移到 'tag_id'...")
+            # Add the new column if it doesn't exist
+            await conn.execute("ALTER TABLE reputations ADD COLUMN IF NOT EXISTS tag_id INTEGER[]")
+            # Copy data from old to new
+            await conn.execute("UPDATE reputations SET tag_id = tag_ids WHERE tag_id IS NULL")
+            # Drop the old column
+            await conn.execute("ALTER TABLE reputations DROP COLUMN tag_ids")
+            logger.info("✅ 已成功将 'tag_ids' 迁移到 'tag_id'")
 
-        # 步骤 3: 清理旧的数据库列
-        logger.info("步骤 3: 清理旧的数据库列...")
-        await conn.execute("ALTER TABLE tags DROP COLUMN IF EXISTS tag_name")
-        await conn.execute("ALTER TABLE tags DROP COLUMN IF EXISTS tag_type")
-        await conn.execute("ALTER TABLE reputations DROP COLUMN IF EXISTS target_user_id")
-        await conn.execute("ALTER TABLE reputations DROP COLUMN IF EXISTS voter_user_id")
-        await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS name")
-        await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_active")
-        await conn.execute("ALTER TABLE favorites DROP COLUMN IF EXISTS favorite_user_id")
-        
-        # 步骤 4: 插入默认数据
-        logger.info("步骤 4: 插入默认设置...")
+        logger.info("步骤 3: 插入默认设置...")
         await conn.execute("""
             INSERT INTO settings (key, value) VALUES 
             ('admin_password', 'oracleadmin'),
@@ -167,8 +165,6 @@ async def create_tables():
             ON CONFLICT (key) DO NOTHING
         """)
         
-        # 已移除默认标签的插入
-        
         logger.info("✅ 数据库表初始化/迁移完成")
 
 # === 业务逻辑函数 ===
@@ -176,14 +172,11 @@ async def create_tables():
 async def get_or_create_user_by_username(username: str) -> Optional[Dict]:
     """通过用户名获取用户，如果不存在则创建虚拟用户记录"""
     try:
-        # 尝试通过用户名查找
         target_user = await get_user_by_username(username)
         if target_user:
             return target_user
 
-        # 如果用户不存在，创建虚拟记录
         logger.info(f"用户 @{username} 不存在，将为其创建虚拟档案...")
-        # 使用用户名的哈希值生成一个稳定且唯一的虚拟ID
         virtual_user_id = abs(hash(username))
         
         await db_execute(
@@ -191,7 +184,6 @@ async def get_or_create_user_by_username(username: str) -> Optional[Dict]:
             virtual_user_id, username, f"@{username}"
         )
         
-        # 返回新创建的虚拟用户信息
         return {'id': virtual_user_id, 'username': username, 'first_name': f"@{username}"}
     except Exception as e:
         logger.error(f"获取或创建用户 @{username} 时失败: {e}", exc_info=True)
@@ -202,7 +194,6 @@ async def get_all_tags_by_type(tag_type: str) -> List[Dict]:
     """根据类型获取所有标签"""
     return await db_fetch_all("SELECT id, name FROM tags WHERE type = $1 ORDER BY name", tag_type)
 
-# ... (其他业务逻辑函数保持不变, 已移除便签相关函数)
 async def is_admin(user_id: int) -> bool:
     """检查用户是否为管理员"""
     try:
@@ -215,7 +206,7 @@ async def is_admin(user_id: int) -> bool:
 async def get_setting(key: str) -> Optional[str]:
     """获取系统设置"""
     try:
-        return await db_fetchval("SELECT value FROM settings WHERE key = $1", key)
+        return await db_fetchval("SELECT value FROM settings WHERE key = $1", key.lower())
     except Exception as e:
         logger.error(f"获取设置失败: {e}")
         return None
@@ -230,7 +221,7 @@ async def set_setting(key: str, value: str, user_id: int) -> bool:
                 value = $2, 
                 updated_by = $3, 
                 updated_at = NOW()
-        """, key, value, user_id)
+        """, key.lower(), value, user_id)
         return True
     except Exception as e:
         logger.error(f"设置配置失败: {e}")
@@ -239,8 +230,7 @@ async def set_setting(key: str, value: str, user_id: int) -> bool:
 async def get_user_by_username(username: str) -> Optional[Dict]:
     """通过用户名查找用户"""
     try:
-        # 查询时忽略大小写
-        return await db_fetch_one("SELECT * FROM users WHERE lower(username) = lower($1)", username)
+        return await db_fetch_one("SELECT * FROM users WHERE lower(username) = lower($1)", username.lower())
     except Exception as e:
         logger.error(f"查找用户失败: {e}")
         return None
