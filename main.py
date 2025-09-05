@@ -46,11 +46,12 @@ try:
     from handlers.favorites import add_favorite, remove_favorite, my_favorites_list
     from handlers.stats import user_stats_menu
     from handlers.erasure import request_data_erasure, confirm_data_erasure, cancel_data_erasure
+    # 核心修正：从下面的列表中移除了不存在的 'set_setting_prompt'
     from handlers.admin import (
         god_mode_command, settings_menu, process_admin_input, tags_panel, permissions_panel, 
         system_settings_panel, leaderboard_panel, add_tag_prompt, remove_tag_menu, remove_tag_confirm, 
         execute_tag_deletion, list_all_tags, add_admin_prompt, list_admins, remove_admin_menu, 
-        remove_admin_confirm, execute_admin_removal, set_setting_prompt, set_start_message_prompt, 
+        remove_admin_confirm, execute_admin_removal, set_start_message_prompt, 
         show_all_commands, selective_remove_menu, confirm_user_removal, execute_user_removal
     )
     logger.info("所有 handlers 和 database 模块已成功导入。")
@@ -81,10 +82,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_admin(user.id):
         keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    if update.callback_query:
+
+    # 修正 admin.py 中 process_admin_input 后带来的问题
+    is_callback = hasattr(update, 'callback_query') and update.callback_query
+    if is_callback:
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
         await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
