@@ -50,7 +50,6 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await message.reply_text(error_text)
 
-# ... send_reputation_card 和文件的其余部分与上一版本完全相同 ...
 async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str = "", is_edited: bool = False):
     query = update.callback_query
     message = query.message if query else update.effective_message
