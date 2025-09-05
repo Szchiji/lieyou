@@ -1,49 +1,47 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+
 from database import db_execute, get_or_create_user
 
 logger = logging.getLogger(__name__)
 
 async def request_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Prompts the user to confirm data erasure."""
+    """Asks the user to confirm data deletion."""
+    query = update.callback_query
     text = (
-        "⚠️ **警告：这是一个不可逆的操作！**\n\n"
-        "确认删除您的所有数据吗？这将包括：\n"
-        "- 您给出的所有评价\n"
-        "- 您收到的所有评价\n"
-        "- 您的收藏列表\n"
-        "- 您的管理员身份（如果适用）\n\n"
-        "您的用户记录将被从数据库中彻底移除。"
+        "⚠️ **警告：数据删除请求** ⚠️\n\n"
+        "您确定要删除所有与您相关的数据吗？这将包括：\n"
+        "- 您自己的用户档案\n"
+        "- 您对他人的所有评价\n"
+        "- 您所有的收藏记录\n"
+        "- 您收到的所有评价\n\n"
+        "**此操作不可逆转！**"
     )
     keyboard = [
-        [InlineKeyboardButton("🔴 是的，确认删除", callback_data="confirm_data_erasure")],
-        [InlineKeyboardButton("🟢 不，我再想想", callback_data="cancel_data_erasure")]
+        [InlineKeyboardButton("🔴 是的，我确定要删除", callback_data="confirm_data_erasure")],
+        [InlineKeyboardButton("🟢 不，我点错了", callback_data="cancel_data_erasure")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # 核心修正：判断是命令还是回调，并使用正确的方法
-    if update.callback_query:
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
-    elif update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def confirm_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Erases user data upon confirmation."""
+    """Deletes all data associated with the user."""
     query = update.callback_query
     user = await get_or_create_user(user_id=query.from_user.id)
+    
     if not user:
-        await query.edit_message_text("❌ 找不到您的用户数据，可能已被删除。")
+        await query.edit_message_text("❌ 未找到您的用户数据，可能已被删除。")
         return
+
     try:
         await db_execute("DELETE FROM users WHERE pkid = $1", user['pkid'])
-        await query.edit_message_text("✅ 您的所有数据已成功从本机器人数据库中删除。感谢您的使用。")
+        await query.edit_message_text("✅ 您的所有数据已成功从本机器人数据库中永久删除。")
+        logger.info(f"User with pkid {user['pkid']} (ID: {query.from_user.id}) has been erased.")
     except Exception as e:
         logger.error(f"删除用户数据失败 (pkid: {user['pkid']}): {e}", exc_info=True)
-        await query.edit_message_text("❌ 删除数据时发生严重错误，请联系机器人管理员。")
+        await query.edit_message_text("❌ 删除数据时发生严重错误。请联系管理员。")
 
 async def cancel_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancels the data erasure process."""
-    from main import start_command # 延迟导入以避免循环依赖
-    await update.callback_query.answer("操作已取消。")
+    """Cancels the data deletion request and returns to the main menu."""
+    from .admin import start_command # 避免循环导入
     await start_command(update, context)
