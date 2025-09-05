@@ -1,108 +1,104 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-from database import db_fetch_all, db_fetch_val, get_or_create_user
+from math import ceil
+import json
+
+from database import db_fetch_all, db_fetch_one
 
 logger = logging.getLogger(__name__)
 
-async def get_leaderboard_data(board_type: str, page: int, per_page: int = 10):
-    """从数据库获取排行榜数据，适配新的 evaluations 表"""
-    offset = (page - 1) * per_page
+PAGE_SIZE = 10
+CACHE_KEY = "leaderboard_cache"
+CACHE_DURATION = 300 # 缓存5分钟
+
+async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
+    keyboard = [
+        [InlineKeyboardButton("👍 推荐榜", callback_data="leaderboard_recommend_1"),
+         InlineKeyboardButton("👎 警告榜", callback_data="leaderboard_block_1")],
+        [InlineKeyboardButton("✨ 声望榜", callback_data="leaderboard_score_1"),
+         InlineKeyboardButton("❤️ 人气榜", callback_data="leaderboard_favorites_1")],
+        [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int):
+    query = update.callback_query
     
-    # 核心改动：从 evaluations 表计算声望
-    query = f"""
-        WITH user_scores AS (
-            SELECT
-                target_user_pkid,
-                SUM(CASE WHEN type = 'recommend' THEN 1 ELSE -1 END) as score
-            FROM
-                evaluations
-            GROUP BY
-                target_user_pkid
-        )
+    # 尝试从缓存获取数据
+    cached_data = context.bot_data.get(CACHE_KEY)
+    current_time = context.application.create_task(update.effective_message.date).done().result().timestamp()
+
+    if cached_data and (current_time - cached_data['timestamp'] < CACHE_DURATION):
+        logger.info(f"从缓存加载排行榜数据 ({board_type})")
+        all_users = cached_data['data']
+    else:
+        logger.info("重新生成排行榜数据并缓存")
+        sql = """
         SELECT
             u.pkid,
-            u.first_name,
             u.username,
-            us.score
-        FROM
-            user_scores us
-        JOIN
-            users u ON us.target_user_pkid = u.pkid
-        WHERE
-            us.score != 0
-        ORDER BY
-            us.score {'DESC' if board_type == 'top' else 'ASC'}
-        LIMIT $1 OFFSET $2;
-    """
-    
-    total_query = "SELECT COUNT(*) FROM (SELECT 1 FROM evaluations GROUP BY target_user_pkid HAVING SUM(CASE WHEN type = 'recommend' THEN 1 ELSE -1 END) != 0) as active_users;"
-    
-    try:
-        users = await db_fetch_all(query, per_page, offset)
-        total_users = await db_fetch_val(total_query) or 0
-        return users, total_users
-    except Exception as e:
-        logger.error(f"查询排行榜数据失败: {e}", exc_info=True)
-        return [], 0
+            u.first_name,
+            COALESCE(rec.count, 0) as recommend_count,
+            COALESCE(blk.count, 0) as block_count,
+            COALESCE(fav.count, 0) as favorite_count,
+            (COALESCE(rec.count, 0) - COALESCE(blk.count, 0)) as score
+        FROM users u
+        LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM evaluations WHERE type = 'recommend' GROUP BY target_user_pkid) rec ON u.pkid = rec.target_user_pkid
+        LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM evaluations WHERE type = 'block' GROUP BY target_user_pkid) blk ON u.pkid = blk.target_user_pkid
+        LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM favorites GROUP BY target_user_pkid) fav ON u.pkid = fav.target_user_pkid
+        """
+        all_users = await db_fetch_all(sql)
+        context.bot_data[CACHE_KEY] = {'timestamp': current_time, 'data': all_users}
 
-async def leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int = 1):
-    """显示排行榜菜单（无缓存版本）"""
-    query = update.callback_query
-    await get_or_create_user(user_id=query.from_user.id, username=query.from_user.username, first_name=query.from_user.first_name)
+    sort_key, title_icon, title_text = {
+        'recommend': ('recommend_count', "👍", "推荐榜"),
+        'block': ('block_count', "👎", "警告榜"),
+        'score': ('score', "✨", "声望榜"),
+        'favorites': ('favorite_count', "❤️", "人气榜")
+    }.get(board_type, ('score', "✨", "声望榜"))
+
+    sorted_users = sorted(all_users, key=lambda x: x[sort_key], reverse=True)
     
-    per_page = 10
-    users, total_users = await get_leaderboard_data(board_type, page, per_page)
-    total_pages = max(1, (total_users + per_page - 1) // per_page)
+    total_count = len(sorted_users)
+    total_pages = ceil(total_count / PAGE_SIZE) if total_count > 0 else 1
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
     
-    title = "🏆 好评榜" if board_type == "top" else "☠️ 差评榜"
-    text = f"**{title} (第 {page}/{total_pages} 页)**\n\n"
+    users_on_page = sorted_users[offset : offset + PAGE_SIZE]
     
-    if not users:
-        text += "这里空空如也..."
+    text = f"{title_icon} **{title_text}** (第 {page}/{total_pages} 页)\n\n"
+    
+    if not users_on_page:
+        text += "_暂无数据_"
     else:
-        rank_start = (page - 1) * per_page
-        for i, user in enumerate(users):
-            rank = rank_start + i + 1
-            first_name = user.get('first_name')
-            username = user.get('username')
-            if first_name and first_name != username:
-                display_name = f"{first_name} (@{username})" if username else first_name
-            elif username:
-                display_name = f"@{username}"
-            else:
-                display_name = f"用户 {user['pkid']}"
-            score = user['score']
-            line = f"`{rank}.` **{display_name}** (声望: `{score}`)\n"
-            text += line
-
-    keyboard_list = []
-    nav_row = []
-    if page > 1:
-        nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"leaderboard_{board_type}_{page-1}"))
-    if page < total_pages:
-        nav_row.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"leaderboard_{board_type}_{page+1}"))
+        rank_start = offset + 1
+        for i, user in enumerate(users_on_page):
+            rank = rank_start + i
+            display_name = f"@{user['username']}" if user['username'] else (user['first_name'] or f"用户{user['pkid']}")
+            score = user[sort_key]
+            text += f"`{rank:2d}.` {display_name} - **{score}**\n"
+            
+    keyboard = []
+    pagination = []
+    if page > 1: pagination.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"leaderboard_{board_type}_{page-1}"))
+    if page < total_pages: pagination.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"leaderboard_{board_type}_{page+1}"))
+    if pagination: keyboard.append(pagination)
     
-    if nav_row:
-        keyboard_list.append(nav_row)
+    keyboard.append([InlineKeyboardButton("🔙 返回榜单选择", callback_data="leaderboard_menu")])
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    keyboard_list.append([
-        InlineKeyboardButton("🔄 刷新", callback_data=f"leaderboard_refresh_{board_type}_{page}"),
-        InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")
-    ])
+async def clear_leaderboard_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if CACHE_KEY in context.bot_data:
+        del context.bot_data[CACHE_KEY]
+        logger.info("排行榜缓存已手动清除。")
+        await query.answer("✅ 排行榜缓存已清除！", show_alert=True)
+    else:
+        await query.answer("ℹ️ 当前没有排行榜缓存。", show_alert=True)
     
-    reply_markup = InlineKeyboardMarkup(keyboard_list)
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-
-async def refresh_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int):
-    """刷新排行榜并重新显示"""
-    query = update.callback_query
-    await query.answer("排行榜已刷新！")
-    # 直接重新调用 menu 函数即可，无需处理缓存
-    await leaderboard_menu(update, context, board_type, page)
-
-async def admin_clear_leaderboard_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员手动清除所有排行榜缓存（功能保留，但仅作提示）"""
-    query = update.callback_query
-    await query.answer("缓存功能已移除，排行榜总是显示实时数据。", show_alert=True)
+    # 返回管理员面板
+    from .admin import leaderboard_panel
+    await leaderboard_panel(update, context)
