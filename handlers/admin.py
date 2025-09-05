@@ -14,7 +14,8 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-# 缺失的函数 - process_admin_input
+# 所有可能缺失的函数
+
 async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理管理员输入"""
     user_id = update.effective_user.id
@@ -33,6 +34,65 @@ async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await process_motto_input(update, context)
     elif waiting_for == 'broadcast_message':
         await process_broadcast_input(update, context)
+
+async def tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """标签面板 - 显示标签管理界面"""
+    user_id = update.effective_user.id
+    if not await is_admin(user_id):
+        await update.callback_query.answer("❌ 权限不足", show_alert=True)
+        return
+    
+    try:
+        await update.callback_query.answer()
+        
+        # 获取标签统计
+        tags_count = await db_fetchval("SELECT COUNT(*) FROM tags")
+        popular_tags = await db_fetch_all("""
+            SELECT t.name, COUNT(mt.motto_id) as usage_count
+            FROM tags t
+            LEFT JOIN motto_tags mt ON t.id = mt.tag_id
+            GROUP BY t.id, t.name
+            ORDER BY usage_count DESC
+            LIMIT 5
+        """)
+        
+        message = f"""🏷️ **标签管理面板**
+
+📊 **统计信息**
+• 总标签数: {tags_count}
+
+🔥 **热门标签**
+"""
+        
+        if popular_tags:
+            for i, tag in enumerate(popular_tags[:5], 1):
+                message += f"{i}. {tag['name']}: {tag['usage_count']}次使用\n"
+        else:
+            message += "暂无标签数据\n"
+        
+        keyboard = [
+            [InlineKeyboardButton("📊 查看所有标签", callback_data="admin_view_all_tags")],
+            [InlineKeyboardButton("➕ 添加新标签", callback_data="admin_add_tag")],
+            [InlineKeyboardButton("✏️ 编辑标签", callback_data="admin_edit_tag")],
+            [InlineKeyboardButton("🗑️ 删除标签", callback_data="admin_delete_tag")],
+            [InlineKeyboardButton("📈 标签统计", callback_data="admin_tag_stats")],
+            [InlineKeyboardButton("🔙 返回管理中心", callback_data="back_to_admin_menu")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.edit_message_text(
+            message,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"标签面板显示失败: {e}")
+        await update.callback_query.edit_message_text(
+            "❌ 加载标签面板失败。",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="back_to_admin_menu")]])
+        )
 
 async def god_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """神谕模式命令 - 使用密码获取管理员权限"""
@@ -797,11 +857,22 @@ def admin_required(func):
 
 # 导出所有处理函数
 __all__ = [
-    'process_admin_input',  # 主要缺失的函数
+    'process_admin_input',      # 必需的主函数
+    'tags_panel',              # 新添加的缺失函数  
     'god_mode_command',
     'settings_menu', 
     'admin_panel_handler',
     'handle_admin_callbacks',
     'create_pagination_keyboard',
-    'admin_required'
+    'admin_required',
+    'tag_management_menu',
+    'motto_management_menu',
+    'permission_management_menu',
+    'system_settings_menu',
+    'leaderboard_management_menu',
+    'view_all_tags',
+    'add_new_tag',
+    'motto_statistics',
+    'view_admin_list',
+    'system_status'
 ]
