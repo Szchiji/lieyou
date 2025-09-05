@@ -31,7 +31,7 @@ if not TELEGRAM_BOT_TOKEN:
     exit()
 logger.info("TELEGRAM_BOT_TOKEN 已加载。")
 if not RENDER_EXTERNAL_URL:
-    logger.warning("RENDER_EXTERNAL_URL 环境变量未设置，将使用轮询模式。")
+    logger.info("RENDER_EXTERNAL_URL 环境变量未设置，将使用轮询模式。")
 else:
     logger.info(f"RENDER_EXTERNAL_URL 已加载: {RENDER_EXTERNAL_URL}")
 
@@ -55,7 +55,9 @@ except ImportError as e:
     logger.critical(f"模块导入失败: {e}", exc_info=True)
     exit()
 
+# --- 处理器定义 ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示完整的主菜单 (仅 /start, /help)"""
     user = update.effective_user
     message = update.effective_message or update.callback_query.message
     
@@ -83,55 +85,55 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
 
     routes = {
+        # 私人菜单
         r"^my_favorites_(\d+)$": (lambda p: my_favorites(update, context, int(p[0]))),
+        r"^request_data_erasure$": (lambda p: request_data_erasure(update, context)),
+        r"^confirm_data_erasure$": (lambda p: confirm_data_erasure(update, context)),
+        r"^cancel_data_erasure$": (lambda p: cancel_data_erasure(update, context)),
+        r"^back_to_help$": (lambda p: start_command(update, context)),
+
+        # 公共/私人通用的排行榜逻辑
+        r"^leaderboard_menu$": (lambda p: show_leaderboard_menu(update, context)),
+        r"^leaderboard_menu_simple$": (lambda p: leaderboard_command(update, context)),
+        r"^leaderboard_(\w+)_(\d+)$": (lambda p: get_leaderboard_page(update, context, p[0], int(p[1]))),
+
+        # 声誉系统
         r"^add_favorite_(\d+)_(.*)$": (lambda p: add_favorite(update, context, int(p[0]), p[1])),
         r"^remove_favorite_(\d+)_(.*)$": (lambda p: remove_favorite(update, context, int(p[0]), p[1])),
-        
         r"^vote_recommend_(\d+)_(.*)$": (lambda p: vote_menu(update, context, int(p[0]), 'recommend', p[1])),
         r"^vote_block_(\d+)_(.*)$": (lambda p: vote_menu(update, context, int(p[0]), 'block', p[1])),
         r"^process_vote_(\d+)_(\d+)_(.*)$": (lambda p: process_vote(update, context, int(p[0]), int(p[1]), p[2])),
         r"^back_to_rep_card_(\d+)_(.*)$": (lambda p: back_to_rep_card(update, context, int(p[0]), p[1])),
-        
         r"^stats_user_(\d+)_(\d+)_(.*)$": (lambda p: user_stats_menu(update, context, int(p[0]), int(p[1]), p[2])),
         
-        r"^request_data_erasure$": (lambda p: request_data_erasure(update, context)),
-        r"^confirm_data_erasure$": (lambda p: confirm_data_erasure(update, context)),
-        r"^cancel_data_erasure$": (lambda p: cancel_data_erasure(update, context)),
-        
+        # 管理员面板
         r"^admin_settings_menu$": (lambda p: settings_menu(update, context)),
         r"^admin_panel_tags$": (lambda p: tags_panel(update, context)),
         r"^admin_panel_permissions$": (lambda p: permissions_panel(update, context)),
         r"^admin_panel_system$": (lambda p: system_settings_panel(update, context)),
         r"^admin_leaderboard_panel$": (lambda p: leaderboard_panel(update, context)),
-        
         r"^admin_tags_add_recommend_prompt$": (lambda p: add_tag_prompt(update, context, 'recommend')),
         r"^admin_tags_add_block_prompt$": (lambda p: add_tag_prompt(update, context, 'block')),
         r"^admin_tags_list$": (lambda p: list_all_tags(update, context)),
         r"^admin_tags_remove_menu_(\d+)$": (lambda p: remove_tag_menu(update, context, int(p[0]))),
         r"^admin_tags_remove_confirm_(\d+)_(\d+)$": (lambda p: remove_tag_confirm(update, context, int(p[0]), int(p[1]))),
         r"^admin_tag_delete_(\d+)$": (lambda p: execute_tag_deletion(update, context, int(p[0]))),
-
         r"^admin_perms_add_prompt$": (lambda p: add_admin_prompt(update, context)),
         r"^admin_perms_list$": (lambda p: list_admins(update, context)),
         r"^admin_perms_remove_menu_(\d+)$": (lambda p: remove_admin_menu(update, context, int(p[0]))),
         r"^admin_perms_remove_confirm_(\d+)_(\d+)$": (lambda p: remove_admin_confirm(update, context, int(p[0]), int(p[1]))),
         r"^admin_remove_admin_(\d+)$": (lambda p: execute_admin_removal(update, context, int(p[0]))),
-
         r"^admin_system_set_start_message$": (lambda p: set_start_message_prompt(update, context)),
         r"^admin_show_commands$": (lambda p: show_all_commands(update, context)),
         r"^admin_leaderboard_clear_cache$": (lambda p: clear_leaderboard_cache(update, context)),
-
-        r"^leaderboard_menu$": (lambda p: show_leaderboard_menu(update, context)),
-        r"^leaderboard_(\w+)_(\d+)$": (lambda p: get_leaderboard_page(update, context, p[0], int(p[1]))),
-        
-        r"^back_to_help$": (lambda p: start_command(update, context)),
     }
 
     for pattern, handler in routes.items():
         match = re.fullmatch(pattern, data)
         if match:
             try:
-                await handler(match.groups())
+                if update.callback_query.message:
+                    await handler(match.groups())
                 return
             except Exception as e:
                 logger.error(f"处理回调 '{data}' 时发生异常: {e}", exc_info=True)
@@ -142,6 +144,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("捕获到未处理的异常:", exc_info=context.error)
 
+# --- FastAPI 生命周期和应用实例 ---
 ptb_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -151,16 +154,14 @@ async def lifespan(app: FastAPI):
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
     
-    # --- 命令和消息处理器 ---
+    # 命令和消息处理器
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
     ptb_app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    ptb_app.add_handler(MessageHandler(filters.TEXT & filters.Regex('^排行榜$'), leaderboard_command))
+    
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE))
-    
-    # --- 核心修正：添加一个新的消息处理器，专门匹配 "排行榜" 这三个字 ---
-    # 这个处理器必须放在更通用的 `handle_query` 处理器之前，以确保优先匹配。
-    ptb_app.add_handler(MessageHandler(filters.TEXT & filters.Regex('^排行榜$'), leaderboard_command))
     
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE), handle_query))
@@ -201,6 +202,31 @@ async def process_telegram_update(request: Request):
 def index():
     return {"status": "神谕者机器人正在运行..."}
 
+# --- 核心修正：恢复应用启动逻辑 ---
 if __name__ == "__main__":
-    # 本地运行的逻辑保持不变
-    pass
+    if RENDER_EXTERNAL_URL:
+        # Render 环境会运行到这里
+        logger.info("检测到 RENDER_EXTERNAL_URL，将以 Webhook 模式启动服务器。")
+        uvicorn.run(app, host="0.0.0.0", port=10000) # Render 使用 10000 端口
+    else:
+        # 本地开发环境会运行到这里
+        logger.info("未检测到 RENDER_EXTERNAL_URL，将以轮询模式启动...")
+        # 重新构建一个 app 用于轮询，因为 lifespan 不会自动运行
+        ptb_poll = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        ptb_poll.add_error_handler(error_handler)
+        
+        ptb_poll.add_handler(CommandHandler("start", start_command))
+        ptb_poll.add_handler(CommandHandler("help", start_command))
+        ptb_poll.add_handler(CommandHandler("leaderboard", leaderboard_command))
+        ptb_poll.add_handler(MessageHandler(filters.TEXT & filters.Regex('^排行榜$'), leaderboard_command))
+        ptb_poll.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
+        ptb_poll.add_handler(CommandHandler("cancel", lambda u, c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE))
+        ptb_poll.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
+        ptb_poll.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE), handle_query))
+        ptb_poll.add_handler(CallbackQueryHandler(button_callback_handler))
+
+        import asyncio
+        asyncio.run(init_db())
+        
+        logger.info("开始轮询...")
+        ptb_poll.run_polling()
