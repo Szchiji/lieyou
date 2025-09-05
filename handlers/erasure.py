@@ -1,63 +1,50 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-
-from database import db_execute, db_fetch_one
-from .leaderboard import clear_leaderboard_cache
+from database import db_execute, get_or_create_user
 
 logger = logging.getLogger(__name__)
 
 async def request_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户发送 /erase_my_data 命令，请求数据抹除"""
-    user = update.effective_user
-    message = (
-        "⚠️ **数据抹除请求** ⚠️\n\n"
-        "你确定要永久删除所有关于你的数据吗？这将包括：\n"
-        "• 你收到的所有好评和差评。\n"
-        "• 你给出的所有评价记录。\n"
-        "• 你在机器人中的收藏夹。\n"
-        "• 你的用户基本信息记录。\n\n"
-        "**此操作不可撤销！** 请谨慎确认。"
-    )
+    """向用户发送删除数据的确认请求"""
     keyboard = [
-        [InlineKeyboardButton("‼️ 我确认，永久删除我的数据", callback_data="confirm_data_erasure")],
-        [InlineKeyboardButton("❌ 取消", callback_data="cancel_data_erasure")]
+        [InlineKeyboardButton("⚠️ 是的，永久删除我的所有数据", callback_data="confirm_data_erasure")],
+        [InlineKeyboardButton("取消", callback_data="cancel_data_erasure")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "**警告：这是一个不可逆操作！**\n\n"
+        "您确定要永久删除您在本机器人中的所有个人数据吗？这包括：\n"
+        "- 您的用户ID和用户名\n"
+        "- 您所有的评价记录（作为投票者）\n"
+        "- 您收到的所有评价\n"
+        "- 您所有的收藏夹记录\n\n"
+        "此操作无法撤销。",
+        reply_markup=reply_markup
+    )
 
 async def confirm_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击确认按钮，执行数据抹除"""
+    """确认并执行数据删除"""
     query = update.callback_query
-    user_id = query.from_user.id
+    user = await get_or_create_user(user_id=query.from_user.id)
+    if not user:
+        await query.edit_message_text("❌ 错误：无法找到您的用户数据。")
+        return
 
     try:
-        # 再次确认用户存在
-        user_exists = await db_fetch_one("SELECT id FROM users WHERE id = $1", user_id)
-        if not user_exists:
-            await query.edit_message_text("你的数据已不存在于我们的系统中。")
-            return
-
-        # 执行删除
-        # 数据库应设置 ON DELETE CASCADE，这样删除 users 表中的用户会自动删除 votes 和 favorites 中的相关记录
-        await db_execute("DELETE FROM users WHERE id = $1", user_id)
+        # 删除与用户相关的所有数据，ON DELETE CASCADE 会自动处理关联表
+        await db_execute("DELETE FROM users WHERE pkid = $1", user['pkid'])
         
-        # 清除缓存
-        clear_leaderboard_cache()
-
-        logger.info(f"用户 {user_id} 已成功抹除其所有数据。")
-        await query.edit_message_text(
-            "✅ **数据已永久删除**\n\n"
-            "你所有与本机器人相关的数据均已被清除。感谢你曾经的使用！\n"
-            "如果你再次与机器人交互，系统将会为你创建新的记录。"
-        )
-
+        # 核心修正：由于缓存已移除，不再需要调用 clear_leaderboard_cache
+        
+        await query.edit_message_text("✅ 您的所有数据已被成功永久删除。感谢您的使用。")
+        logger.info(f"用户 {user['pkid']} ({query.from_user.username}) 已被成功删除。")
+        
     except Exception as e:
-        logger.error(f"数据抹除失败 (user: {user_id}): {e}", exc_info=True)
-        await query.edit_message_text("❌ 操作失败，发生严重错误。请联系机器人管理员。")
+        logger.error(f"删除用户数据时出错 (pkid: {user['pkid']}): {e}", exc_info=True)
+        await query.edit_message_text("❌ 删除数据时发生严重错误，请联系管理员。")
 
 async def cancel_data_erasure(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击取消按钮"""
+    """取消数据删除操作"""
     query = update.callback_query
-    await query.edit_message_text("✅ 操作已取消，你的数据安然无恙。")
+    await query.edit_message_text("操作已取消，您的数据安然无恙。")
