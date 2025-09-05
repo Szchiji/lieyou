@@ -1,68 +1,62 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from math import ceil
 
-from database import db_fetch_one, db_fetch_all
+from database import get_or_create_user, is_admin
 
 logger = logging.getLogger(__name__)
 
-PAGE_SIZE = 5
-
-async def user_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, page: int = 1, origin: str = ""):
-    query = update.callback_query
+async def get_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """根据用户是否为管理员生成主菜单。"""
     
-    user_info = await db_fetch_one("SELECT first_name, username FROM users WHERE pkid = $1", target_user_pkid)
-    if not user_info:
-        await query.answer("❌ 找不到该用户。", show_alert=True)
+    text = (
+        "你好！我是猎优伴侣，一个基于社区共识的声誉查询机器人。\n\n"
+        "**基本用法：**\n"
+        "在群聊中发送 `@username 推荐` 或 `@username 警告` 即可开始对某人进行评价。\n\n"
+        "请选择以下功能："
+    )
+
+    keyboard_buttons = [
+        [InlineKeyboardButton("🏆 排行榜", callback_data="leaderboard_menu")],
+        [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
+    ]
+
+    # 如果用户是管理员，添加管理员面板按钮
+    if await is_admin(user_id):
+        keyboard_buttons.append([InlineKeyboardButton("⚙️ 管理员面板", callback_data="admin_panel")])
+    
+    return text, InlineKeyboardMarkup(keyboard_buttons)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理 /start 命令，欢迎用户并显示主菜单。"""
+    user = update.effective_user
+    logger.info(f"用户 {user.id} (@{user.username}) 执行了 /start")
+
+    try:
+        # 尝试创建用户，确保用户在数据库中
+        await get_or_create_user(user)
+    except ValueError as e:
+        # 如果用户没有用户名，则无法创建，发送提示
+        await update.message.reply_text(f"❌ 欢迎！但在开始之前，请先为您的Telegram账户设置一个用户名。")
+        return
+    except Exception as e:
+        logger.error(f"为用户 {user.id} 创建记录时出错: {e}")
+        await update.message.reply_text("❌ 处理您的请求时发生了一个数据库错误。")
         return
 
-    first_name = user_info.get('first_name')
-    username = user_info.get('username')
-    display_name = f"{first_name} (@{username})" if first_name and username else (username or first_name or f"用户 {target_user_pkid}")
+    text, reply_markup = await get_main_menu(user.id)
+    await update.message.reply_text(text, reply_markup=reply_markup)
 
-    # --- 核心修正：修复KeyError ---
-    # Get total distinct tags count
-    total_tags_query = "SELECT COUNT(DISTINCT tag_id) as count FROM evaluations WHERE target_user_pkid = $1;"
-    total_tags_record = await db_fetch_one(total_tags_query, target_user_pkid)
-    # 使用 .get('count', 0) 来安全地获取值
-    total_count = total_tags_record.get('count', 0) if total_tags_record else 0
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理 /help 命令和 'help' 回调，显示主菜单。"""
+    user = update.effective_user
+    text, reply_markup = await get_main_menu(user.id)
 
-    total_pages = ceil(total_count / PAGE_SIZE) if total_count > 0 else 1
-    page = max(1, min(page, total_pages))
-    offset = (page - 1) * PAGE_SIZE
-    
-    text = f"📊 **{display_name} 的声誉统计**\n\n收到的评价标签详情 (共 {total_count} 种):\n\n"
-    
-    tags_query = """
-    SELECT t.name, t.type, COUNT(e.id) as count
-    FROM evaluations e
-    JOIN tags t ON e.tag_id = t.id
-    WHERE e.target_user_pkid = $1
-    GROUP BY t.id, t.name, t.type
-    ORDER BY count DESC
-    LIMIT $2 OFFSET $3;
-    """
-    tags_with_counts = await db_fetch_all(tags_query, target_user_pkid, PAGE_SIZE, offset)
-    
-    if not tags_with_counts:
-        text += "_（暂无评价）_"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
     else:
-        for tag in tags_with_counts:
-            icon = "👍" if tag['type'] == 'recommend' else "👎"
-            text += f"- {icon} `{tag['name']}`: 被标记 {tag['count']} 次\n"
-            
-    # Pagination
-    keyboard = []
-    pagination_buttons = []
-    if page > 1:
-        pagination_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"stats_user_{target_user_pkid}_{page-1}_{origin}"))
-    if page < total_pages:
-        pagination_buttons.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"stats_user_{target_user_pkid}_{page+1}_{origin}"))
-    
-    if pagination_buttons:
-        keyboard.append(pagination_buttons)
-        
-    keyboard.append([InlineKeyboardButton("🔙 返回声誉卡片", callback_data=f"back_to_rep_card_{target_user_pkid}_{origin}")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+async def back_to_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """作为回调处理函数，返回主菜单。"""
+    await help_command(update, context)
