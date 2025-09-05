@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters, ApplicationBuilder
+    ContextTypes, filters
 )
 from telegram.constants import ParseMode
 
@@ -75,16 +75,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
     
-    # --- 核心修正：根据聊天类型动态构建键盘 ---
     keyboard = [
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1"), InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
     ]
     
-    # 只在私聊中显示“我的收藏”和“管理面板”
+    # --- 核心修正 #2 & #3: 修正管理员判断逻辑，并添加数据删除按钮 ---
     if message.chat.type == 'private':
-        keyboard.append([InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")])
+        private_buttons = [
+            InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1"),
+            InlineKeyboardButton("🗑️ 删除我的数据", callback_data="erase_my_data_prompt") # 新增按钮
+        ]
+        keyboard.append(private_buttons)
         
-        # 修正了 is_admin 的调用，并确保只在私聊中显示
+        # 修正：无论如何都检查管理员身份
         if await is_admin(user.id):
             keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
 
@@ -92,7 +95,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_callback = hasattr(update, 'callback_query') and update.callback_query
     if is_callback:
-        # 确保在群组里点击返回主菜单时，不会因为消息无变化而报错
         if message.text != start_message or message.reply_markup != reply_markup:
             try:
                 await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -109,14 +111,24 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await get_or_create_user(user_id=query.from_user.id, username=query.from_user.username, first_name=query.from_user.first_name)
     
     simple_handlers = {
-        "back_to_help": start_command, "admin_settings_menu": settings_menu, "admin_panel_tags": tags_panel,
-        "admin_panel_permissions": permissions_panel, "admin_panel_system": system_settings_panel,
-        "admin_leaderboard_panel": leaderboard_panel, "admin_leaderboard_clear_cache": admin_clear_leaderboard_cache,
-        "admin_tags_list": list_all_tags, "admin_perms_list": list_admins, "admin_show_commands": show_all_commands,
+        "back_to_help": start_command, 
+        "my_favorites_refresh": lambda u, c: my_favorites_list(u, c, 1),
+        "erase_my_data_prompt": request_data_erasure, # 新增处理器
+        "admin_settings_menu": settings_menu, 
+        "admin_panel_tags": tags_panel,
+        "admin_panel_permissions": permissions_panel, 
+        "admin_panel_system": system_settings_panel,
+        "admin_leaderboard_panel": leaderboard_panel, 
+        "admin_leaderboard_clear_cache": admin_clear_leaderboard_cache,
+        "admin_tags_list": list_all_tags, 
+        "admin_perms_list": list_admins, 
+        "admin_show_commands": show_all_commands,
         "admin_tags_add_recommend_prompt": lambda u, c: add_tag_prompt(u, c, 'recommend'),
         "admin_tags_add_block_prompt": lambda u, c: add_tag_prompt(u, c, 'block'),
-        "admin_perms_add_prompt": add_admin_prompt, "admin_system_set_start_message": set_start_message_prompt,
-        "confirm_data_erasure": confirm_data_erasure, "cancel_data_erasure": cancel_data_erasure,
+        "admin_perms_add_prompt": add_admin_prompt, 
+        "admin_system_set_start_message": set_start_message_prompt,
+        "confirm_data_erasure": confirm_data_erasure, 
+        "cancel_data_erasure": cancel_data_erasure,
     }
     if data in simple_handlers:
         await simple_handlers[data](update, context); return
@@ -130,7 +142,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         r"back_to_rep_card_(\d+)_(.*)": lambda m: back_to_rep_card(update, context, int(m[0]), m[1] or ""),
         r"rep_card_query_(\d+)_(.*)": lambda m: send_reputation_card(update, context, int(m[0]), m[1] or ""),
         r"add_favorite_(\d+)_(.*)": lambda m: add_favorite(update, context, int(m[0]), m[1] or ""),
-        r"remove_favorite_(\d+)": lambda m: remove_favorite(update, context, int(m[0])),
+        r"remove_favorite_(\d+)_(.*)": lambda m: remove_favorite(update, context, int(m[0]), m[1] or ""),
         r"stats_user_(\d+)_(\d+)_(.*)": lambda m: user_stats_menu(update, context, int(m[0]), int(m[1]), m[2] or ""),
         r"admin_tags_remove_menu_(\d+)": lambda m: remove_tag_menu(update, context, int(m[0])),
         r"admin_tags_remove_confirm_(\d+)_(\d+)": lambda m: remove_tag_confirm(update, context, int(m[0]), int(m[1])),
@@ -143,7 +155,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     for pattern, handler in patterns.items():
         match = re.fullmatch(pattern, data)
         if match:
-            await handler(match.groups())
+            try:
+                await handler(match.groups())
+            except Exception as e:
+                logger.error(f"处理回调 '{data}' 时发生异常: {e}", exc_info=True)
             return
             
     logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
@@ -156,14 +171,15 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI lifespan: 启动中...")
     
     logger.info("构建 Telegram Application...")
+    # 使用 no_schedules=False 确保 JobQueue 被正确初始化和使用
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
     
-    # 添加处理器
+    # 添加处理器...
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
-    ptb_app.add_handler(CommandHandler("myfavorites", my_favorites_list, filters=filters.ChatType.PRIVATE))
-    ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
+    # 移除 /erase_my_data 命令处理器，因为它现在由按钮触发
+    # ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
@@ -180,16 +196,24 @@ async def lifespan(app: FastAPI):
         raise
 
     if RENDER_EXTERNAL_URL:
-        logger.info(f"正在设置 webhook 到: {RENDER_EXTERNAL_URL}/webhook")
-        await ptb_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook", allowed_updates=Update.ALL_TYPES)
-        logger.info("Webhook 设置成功。")
-
-    await ptb_app.initialize()
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        logger.info(f"正在设置 webhook 到: {webhook_url}")
+        # 核心修正 #1: 确保 PTB Application 知道要处理 JobQueue
+        if ptb_app.job_queue:
+            logger.info("JobQueue 已找到，将与 Webhook 一同运行。")
+            await ptb_app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+            await ptb_app.start() # 启动后台任务，包括 JobQueue
+        else:
+            logger.error("JobQueue 未初始化！定时删除功能将无法工作。")
+            await ptb_app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+    
     logger.info("PTB Application 初始化完成。机器人已准备就绪！")
     
     yield
     
     logger.info("FastAPI lifespan: 关闭中...")
+    if ptb_app.running:
+        await ptb_app.stop() # 停止后台任务
     await ptb_app.shutdown()
     db_pool = await get_pool()
     if db_pool: await db_pool.close(); logger.info("数据库连接池已关闭。")
