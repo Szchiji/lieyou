@@ -31,13 +31,13 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_user_from_entity:
         target_user_db_info = await get_or_create_user(user_id=target_user_from_entity.id, username=target_user_from_entity.username, first_name=target_user_from_entity.first_name)
     elif target_username_from_text:
-        target_user_db_info = await get_or_create_user(username=target_username_from_text)
+        target_user_db_info = await get_or_create_user(username=target_username_from_text, first_name=target_username_from_text)
     if target_user_db_info:
         await send_reputation_card(message, context, target_user_db_info['pkid'])
     else:
         await message.reply_text("❌ 无法创建或查询该用户档案。")
 
-async def send_reputation_card(message_or_query, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str = None):
+async def send_reputation_card(message_or_query, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str = ""):
     is_callback = isinstance(message_or_query, Update)
     if is_callback:
         query = message_or_query.callback_query; message = query.message
@@ -51,27 +51,36 @@ async def send_reputation_card(message_or_query, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(card_data['text'], reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         else:
             sent_message = await message.reply_text(card_data['text'], reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-            await schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id)
+            # 收藏后刷新不需要自动删除
+            if origin != "fav_refresh":
+                await schedule_message_deletion(context, sent_message.chat_id, sent_message.message_id)
     except Exception as e:
         logger.error(f"发送声誉卡片失败 (pkid: {target_user_pkid}): {e}", exc_info=True)
         err_msg = "❌ 生成声誉卡片时出错。"
         if query: await query.answer(err_msg, show_alert=True)
         else: await message.reply_text(err_msg)
 
-async def build_reputation_card_data(target_user_pkid: int, origin: str = None) -> dict:
+async def build_reputation_card_data(target_user_pkid: int, origin: str = "") -> dict:
     user_info = await db_fetch_one("SELECT * FROM users WHERE pkid = $1", target_user_pkid)
     if not user_info: return None
 
-    # 修正：优先使用 first_name，如果不存在，则使用 @username
-    display_name = user_info['first_name'] or (f"@{user_info['username']}" if user_info['username'] else f"用户 {user_info['pkid']}")
-    
-    query = """
+    # 终极修复：完善的显示名逻辑
+    first_name = user_info.get('first_name')
+    username = user_info.get('username')
+    if first_name and first_name != username:
+        display_name = f"{first_name} (@{username})" if username else first_name
+    elif username:
+        display_name = f"@{username}"
+    else:
+        display_name = f"用户 {user_info['pkid']}"
+
+    query_sql = """
     SELECT 
         (SELECT COUNT(*) FROM votes v JOIN tags t ON v.tag_id=t.id WHERE v.target_user_pkid = $1 AND t.type = 'recommend') as recommend_count,
         (SELECT COUNT(*) FROM votes v JOIN tags t ON v.tag_id=t.id WHERE v.target_user_pkid = $1 AND t.type = 'block') as block_count,
         (SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1) as favorite_count;
     """
-    data = await db_fetch_one(query, target_user_pkid)
+    data = await db_fetch_one(query_sql, target_user_pkid)
     score = (data['recommend_count'] or 0) - (data['block_count'] or 0)
     text = (f"**声誉卡片: {display_name}**\n\n"
             f"👍 **推荐**: `{data['recommend_count'] or 0}`\n"
@@ -81,24 +90,25 @@ async def build_reputation_card_data(target_user_pkid: int, origin: str = None) 
             f"✨ **综合声望**: `{score}`")
     
     keyboard = [
-        [InlineKeyboardButton("👍 推荐", callback_data=f"vote_recommend_{target_user_pkid}_1_{origin or ''}"),
-         InlineKeyboardButton("👎 警告", callback_data=f"vote_block_{target_user_pkid}_1_{origin or ''}")],
-        [InlineKeyboardButton("❤️ 收藏", callback_data=f"add_favorite_{target_user_pkid}"),
-         InlineKeyboardButton("📊 统计", callback_data=f"stats_user_{target_user_pkid}_1")]
+        [InlineKeyboardButton("👍 推荐", callback_data=f"vote_recommend_{target_user_pkid}_1_{origin}"),
+         InlineKeyboardButton("👎 警告", callback_data=f"vote_block_{target_user_pkid}_1_{origin}")],
+        [InlineKeyboardButton("❤️ 收藏", callback_data=f"add_favorite_{target_user_pkid}_{origin}"),
+         InlineKeyboardButton("📊 统计", callback_data=f"stats_user_{target_user_pkid}_1_{origin}")]
     ]
     
     if origin and origin.startswith("fav_"):
         page = origin.split('_')[1]
         keyboard.append([InlineKeyboardButton("🔙 返回收藏列表", callback_data=f"my_favorites_{page}")])
-    
+    elif origin and origin.startswith("stats_"):
+        keyboard.append([InlineKeyboardButton("🔙 返回统计", callback_data=f"stats_user_{target_user_pkid}_1")])
+        
     return {'text': text, 'keyboard': keyboard}
 
 async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, vote_type: str, page: int, origin: str):
     query = update.callback_query
     tags = await db_fetch_all("SELECT id, name FROM tags WHERE type = $1 ORDER BY name", vote_type)
     if not tags:
-        await query.answer(f"❌ 系统中还没有任何{'推荐' if vote_type == 'recommend' else '警告'}标签。", show_alert=True)
-        return
+        await query.answer(f"❌ 系统中还没有任何{'推荐' if vote_type == 'recommend' else '警告'}标签。", show_alert=True); return
     keyboard = [[InlineKeyboardButton(tag['name'], callback_data=f"process_vote_{target_user_pkid}_{tag['id']}_{origin}")] for tag in tags]
     keyboard.append([InlineKeyboardButton("🔙 返回声誉卡片", callback_data=f"back_to_rep_card_{target_user_pkid}_{origin}")])
     vote_text = "👍 请选择一个**推荐**标签：" if vote_type == "recommend" else "👎 请选择一个**警告**标签："
@@ -114,10 +124,8 @@ async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, targe
         await query.answer("❌ 你不能给自己投票。", show_alert=True); return
     try:
         await db_execute(
-            "INSERT INTO votes (voter_user_pkid, target_user_pkid, tag_id, message_id, chat_id) "
-            "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (voter_user_pkid, target_user_pkid, tag_id) DO NOTHING;",
-            voter['pkid'], target_user_pkid, tag_id, query.message.message_id, query.message.chat_id
-        )
+            "INSERT INTO votes (voter_user_pkid, target_user_pkid, tag_id, message_id, chat_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (voter_user_pkid, target_user_pkid, tag_id) DO NOTHING;",
+            voter['pkid'], target_user_pkid, tag_id, query.message.message_id, query.message.chat_id)
         await query.answer("✅ 投票成功！", show_alert=True)
     except Exception as e:
         logger.error(f"投票处理失败: {e}", exc_info=True)
