@@ -76,55 +76,11 @@ async def update_user_activity(user_id: int, username: str = None, first_name: s
         logger.error(f"更新用户活动时出错: {e}", exc_info=True)
 
 async def create_tables():
-    """创建数据库表"""
+    """创建并迁移数据库表"""
     async with db_pool.acquire() as conn:
-        # 检查并修复表结构
-        try:
-            # 修复 users 表
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT")
-            await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW()")
-            
-            # 修复 tags 表  
-            await conn.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS name TEXT")
-            await conn.execute("ALTER TABLE tags ADD COLUMN IF NOT EXISTS type TEXT")
-            
-            # 如果是旧字段名，进行数据迁移
-            try:
-                # 迁移 users 表数据
-                await conn.execute("UPDATE users SET first_name = name WHERE first_name IS NULL AND name IS NOT NULL")
-                await conn.execute("UPDATE users SET last_activity = last_active WHERE last_activity IS NULL AND last_active IS NOT NULL")
-                
-                # 迁移 tags 表数据
-                await conn.execute("UPDATE tags SET name = tag_name WHERE name IS NULL AND tag_name IS NOT NULL")
-                await conn.execute("UPDATE tags SET type = tag_type WHERE type IS NULL AND tag_type IS NOT NULL")
-                
-            except Exception as migration_error:
-                logger.info(f"数据迁移跳过（可能是新表）: {migration_error}")
-            
-            # 修复 reputations 表
-            await conn.execute("ALTER TABLE reputations ADD COLUMN IF NOT EXISTS target_id BIGINT")
-            await conn.execute("ALTER TABLE reputations ADD COLUMN IF NOT EXISTS voter_id BIGINT") 
-            
-            try:
-                # 迁移 reputations 表数据
-                await conn.execute("UPDATE reputations SET target_id = target_user_id WHERE target_id IS NULL AND target_user_id IS NOT NULL")
-                await conn.execute("UPDATE reputations SET voter_id = voter_user_id WHERE voter_id IS NULL AND voter_user_id IS NOT NULL")
-            except Exception as migration_error:
-                logger.info(f"reputations 迁移跳过: {migration_error}")
-            
-            # 修复 favorites 表
-            await conn.execute("ALTER TABLE favorites ADD COLUMN IF NOT EXISTS target_id BIGINT")
-            
-            try:
-                # 迁移 favorites 表数据
-                await conn.execute("UPDATE favorites SET target_id = favorite_user_id WHERE target_id IS NULL AND favorite_user_id IS NOT NULL")
-            except Exception as migration_error:
-                logger.info(f"favorites 迁移跳过: {migration_error}")
-                
-        except Exception as e:
-            logger.warning(f"表结构修复过程中的警告: {e}")
-        
-        # 创建基础表（如果不存在）
+        # 步骤 1: 创建所有表和新列（如果它们不存在）
+        # ------------------------------------------------
+        logger.info("步骤 1: 确保所有表和列都存在...")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id BIGINT PRIMARY KEY,
@@ -135,18 +91,15 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS tags (
                 id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
+                name TEXT NOT NULL UNIQUE,
                 type TEXT NOT NULL CHECK (type IN ('recommend', 'block')),
                 created_by BIGINT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                UNIQUE(name)
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS reputations (
                 id SERIAL PRIMARY KEY,
@@ -159,7 +112,6 @@ async def create_tables():
                 UNIQUE(target_id, voter_id)
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
                 id SERIAL PRIMARY KEY,
@@ -169,7 +121,6 @@ async def create_tables():
                 UNIQUE(user_id, target_id)
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -178,7 +129,6 @@ async def create_tables():
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS mottos (
                 id SERIAL PRIMARY KEY,
@@ -187,7 +137,6 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
-        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS erasure_records (
                 id SERIAL PRIMARY KEY,
@@ -196,8 +145,48 @@ async def create_tables():
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+
+        # 步骤 2: 执行从旧结构到新结构的数据迁移
+        # ------------------------------------------------
+        logger.info("步骤 2: 执行数据迁移（如果需要）...")
+        try:
+            # 迁移 tags 表: 从 tag_name/tag_type -> name/type
+            if await conn.fetchval("SELECT to_regclass('tags') IS NOT NULL"):
+                 if await conn.fetchval("SELECT 1 FROM information_schema.columns WHERE table_name='tags' AND column_name='tag_name'"):
+                    logger.info("检测到旧列 'tag_name'，开始迁移 tags 表...")
+                    await conn.execute("UPDATE tags SET name = tag_name WHERE name IS NULL AND tag_name IS NOT NULL")
+                    await conn.execute("UPDATE tags SET type = tag_type WHERE type IS NULL AND tag_type IS NOT NULL")
+                    logger.info("tags 表数据迁移完成。")
+            
+            # 迁移 reputations 表: 从 ...user_id -> ...id
+            if await conn.fetchval("SELECT to_regclass('reputations') IS NOT NULL"):
+                if await conn.fetchval("SELECT 1 FROM information_schema.columns WHERE table_name='reputations' AND column_name='target_user_id'"):
+                    logger.info("检测到旧列 'target_user_id'，开始迁移 reputations 表...")
+                    await conn.execute("ALTER TABLE reputations ADD COLUMN IF NOT EXISTS target_id BIGINT")
+                    await conn.execute("ALTER TABLE reputations ADD COLUMN IF NOT EXISTS voter_id BIGINT")
+                    await conn.execute("UPDATE reputations SET target_id = target_user_id WHERE target_id IS NULL AND target_user_id IS NOT NULL")
+                    await conn.execute("UPDATE reputations SET voter_id = voter_user_id WHERE voter_id IS NULL AND voter_user_id IS NOT NULL")
+                    logger.info("reputations 表数据迁移完成。")
+
+        except Exception as e:
+            logger.error(f"数据迁移过程中发生错误: {e}", exc_info=True)
+            # 不抛出异常，允许应用继续启动，但记录严重错误
+
+        # 步骤 3: 安全地删除已迁移的旧列
+        # ------------------------------------------------
+        logger.info("步骤 3: 清理旧的数据库列...")
+        await conn.execute("ALTER TABLE tags DROP COLUMN IF EXISTS tag_name")
+        await conn.execute("ALTER TABLE tags DROP COLUMN IF EXISTS tag_type")
+        await conn.execute("ALTER TABLE reputations DROP COLUMN IF EXISTS target_user_id")
+        await conn.execute("ALTER TABLE reputations DROP COLUMN IF EXISTS voter_user_id")
+        # 其他可能存在的旧列...
+        await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS name")
+        await conn.execute("ALTER TABLE users DROP COLUMN IF EXISTS last_active")
+        await conn.execute("ALTER TABLE favorites DROP COLUMN IF EXISTS favorite_user_id")
         
-        # 插入默认设置（不包括默认箴言）
+        # 步骤 4: 插入默认数据（现在应该是安全的）
+        # ------------------------------------------------
+        logger.info("步骤 4: 插入默认设置和标签...")
         await conn.execute("""
             INSERT INTO settings (key, value) VALUES 
             ('admin_password', 'oracleadmin'),
@@ -211,23 +200,15 @@ async def create_tables():
             ON CONFLICT (key) DO NOTHING
         """)
         
-        # 插入默认标签
         await conn.execute("""
             INSERT INTO tags (name, type) VALUES 
-            ('靠谱', 'recommend'),
-            ('诚信', 'recommend'),
-            ('专业', 'recommend'),
-            ('友善', 'recommend'),
-            ('负责', 'recommend'),
-            ('不靠谱', 'block'),
-            ('欺骗', 'block'),
-            ('失信', 'block'),
-            ('态度差', 'block'),
-            ('不负责', 'block')
+            ('靠谱', 'recommend'), ('诚信', 'recommend'), ('专业', 'recommend'),
+            ('友善', 'recommend'), ('负责', 'recommend'), ('不靠谱', 'block'),
+            ('欺骗', 'block'), ('失信', 'block'), ('态度差', 'block'), ('不负责', 'block')
             ON CONFLICT (name) DO NOTHING
         """)
         
-        logger.info("✅ 数据库表创建完成")
+        logger.info("✅ 数据库表初始化/迁移完成")
 
 # === 业务逻辑函数 ===
 
@@ -273,36 +254,36 @@ async def get_user_by_username(username: str) -> Optional[Dict]:
         return None
 
 async def get_random_motto() -> Optional[str]:
-    """获取随机便签"""
+    """获取随机箴言"""
     try:
         return await db_fetchval("SELECT content FROM mottos ORDER BY RANDOM() LIMIT 1")
     except Exception as e:
-        logger.debug(f"获取便签失败（可能为空）: {e}")
+        logger.debug(f"获取箴言失败（可能为空）: {e}")
         return None
 
 async def get_all_mottos() -> List[Dict]:
-    """获取所有便签"""
+    """获取所有箴言"""
     try:
         return await db_fetch_all("SELECT * FROM mottos ORDER BY created_at DESC")
     except Exception as e:
-        logger.error(f"获取所有便签失败: {e}")
+        logger.error(f"获取所有箴言失败: {e}")
         return []
 
 async def add_mottos_batch(mottos: List[str], user_id: int) -> int:
-    """批量添加便签"""
-    added_count = 0
+    """批量添加箴言（高效版）"""
+    data_to_insert = [(motto, user_id) for motto in mottos]
+    if not data_to_insert:
+        return 0
+
     try:
-        for motto in mottos:
-            try:
-                await db_execute(
-                    "INSERT INTO mottos (content, created_by) VALUES ($1, $2)",
-                    motto, user_id
-                )
-                added_count += 1
-            except:
-                # 忽略重复的便签
-                continue
-    except Exception as e:
-        logger.error(f"批量添加便签失败: {e}")
-    
-    return added_count
+        async with db_pool.acquire() as conn:
+            # 使用 executemany 进行批量插入，ON CONFLICT 优雅地处理重复项
+            result = await conn.executemany(
+                "INSERT INTO mottos (content, created_by) VALUES ($1, $2) ON CONFLICT (content) DO NOTHING",
+                data_to_insert
+            )
+            # 解析 "INSERT 0 N" 返回值获取成功插入的行数
+            return int(result.split()[-1])
+    except (Exception, ValueError, IndexError) as e:
+        logger.error(f"批量添加箴言失败: {e}")
+        return 0
