@@ -9,7 +9,6 @@ from telegram.constants import ParseMode
 from database import (
     db_fetch_all, db_fetch_one, db_fetchval, db_execute, db_transaction,
     update_user_activity, get_or_create_user_by_username
-    # 移除了 get_random_motto
 )
 
 logger = logging.getLogger(__name__)
@@ -21,20 +20,17 @@ async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update_user_activity(user_id, update.effective_user.username, update.effective_user.first_name)
     
-    # 提取用户名
     username_match = re.search(r'@(\w{5,})', message_text)
     if not username_match:
         return
     
     username = username_match.group(1)
     
-    # 使用新函数获取或创建用户
     target_user = await get_or_create_user_by_username(username)
     if not target_user:
         await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
         return
     
-    # 检查是否是自己
     if target_user['id'] == user_id:
         await update.message.reply_text("🚫 不能对自己进行评价。")
         return
@@ -48,20 +44,17 @@ async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TY
     
     await update_user_activity(user_id, update.effective_user.username, update.effective_user.first_name)
     
-    # 提取用户名
     username_match = re.search(r'查询\s+@(\w{5,})', message_text)
     if not username_match:
         return
     
     username = username_match.group(1)
     
-    # 使用新函数获取或创建用户
     target_user = await get_or_create_user_by_username(username)
     if not target_user:
         await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
         return
 
-    # 检查是否是自己
     if target_user['id'] == user_id:
         await update.message.reply_text("🚫 不能查询自己的声誉。")
         return
@@ -101,10 +94,7 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
     positive_votes = stats['positive_votes'] or 0
     negative_votes = stats['negative_votes'] or 0
     
-    if total_votes > 0:
-        reputation_score = round((positive_votes / total_votes) * 100)
-    else:
-        reputation_score = 0
+    reputation_score = round((positive_votes / total_votes) * 100) if total_votes > 0 else 0
     
     username = target_user.get('username')
     display_name = target_user.get('first_name') or (f"@{username}" if username else f"用户{target_id}")
@@ -113,26 +103,12 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
     if len(clean_username) > 15:
         clean_username = clean_username[:12] + "..."
 
-    if total_votes == 0:
-        reputation_desc = "中立 (0)"
-        reputation_icon = "⚖️"
-    elif reputation_score >= 90:
-        reputation_desc = f"极佳声誉 ({reputation_score}%)"
-        reputation_icon = "🌟"
-    elif reputation_score >= 75:
-        reputation_desc = f"良好声誉 ({reputation_score}%)"
-        reputation_icon = "✅"
-    elif reputation_score >= 60:
-        reputation_desc = f"一般声誉 ({reputation_score}%)"
-        reputation_icon = "⚖️"
-    elif reputation_score >= 40:
-        reputation_desc = f"较差声誉 ({reputation_score}%)"
-        reputation_icon = "⚠️"
-    else:
-        reputation_desc = f"负面声誉 ({reputation_score}%)"
-        reputation_icon = "💀"
-    
-    # 移除了便签 (motto) 功能
+    if total_votes == 0: reputation_desc, reputation_icon = "中立 (0)", "⚖️"
+    elif reputation_score >= 90: reputation_desc, reputation_icon = f"极佳声誉 ({reputation_score}%)", "🌟"
+    elif reputation_score >= 75: reputation_desc, reputation_icon = f"良好声誉 ({reputation_score}%)", "✅"
+    elif reputation_score >= 60: reputation_desc, reputation_icon = f"一般声誉 ({reputation_score}%)", "⚖️"
+    elif reputation_score >= 40: reputation_desc, reputation_icon = f"较差声誉 ({reputation_score}%)", "⚠️"
+    else: reputation_desc, reputation_icon = f"负面声誉 ({reputation_score}%)", "💀"
     
     message = f"┏━━━━「 📜 神谕之卷 」━━━━┓\n"
     message += f"┃                          ┃\n"
@@ -155,8 +131,9 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
     current_user_id = update.effective_user.id
     if target_id != current_user_id:
         action_buttons = []
+        # FIX: Changed tag_ids to tag_id
         existing_vote = await db_fetch_one(
-            "SELECT is_positive, tag_ids FROM reputations WHERE target_id = $1 AND voter_id = $2",
+            "SELECT is_positive, tag_id FROM reputations WHERE target_id = $1 AND voter_id = $2",
             target_id, current_user_id
         )
         
@@ -168,10 +145,7 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
                 InlineKeyboardButton("👎 差评", callback_data=f"vote_negative_{target_id}")
             ])
         
-        is_favorited = await db_fetchval(
-            "SELECT EXISTS(SELECT 1 FROM favorites WHERE user_id = $1 AND target_id = $2)",
-            current_user_id, target_id
-        )
+        is_favorited = await db_fetchval("SELECT EXISTS(SELECT 1 FROM favorites WHERE user_id = $1 AND target_id = $2)", current_user_id, target_id)
         fav_text = "💔 取消收藏" if is_favorited else "💖 收藏"
         action_buttons.append(InlineKeyboardButton(fav_text, callback_data=f"toggle_favorite_{target_id}"))
         keyboard.append(action_buttons)
@@ -184,9 +158,6 @@ async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_
     else:
         await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
-# --- 其他函数保持不变 ---
-# (show_reputation_details, show_voters_menu, show_reputation_voters, 等等...)
-# ... (将你提供的文件中的其他函数粘贴到这里)
 async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示详细评价"""
     query = update.callback_query
@@ -198,8 +169,9 @@ async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_
     target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
     display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
     
+    # FIX: Changed tag_ids to tag_id
     details = await db_fetch_all("""
-        SELECT r.is_positive, r.tag_ids, r.comment, r.created_at, u.first_name, u.username
+        SELECT r.is_positive, r.tag_id, r.comment, r.created_at, u.first_name, u.username
         FROM reputations r LEFT JOIN users u ON r.voter_id = u.id
         WHERE r.target_id = $1 ORDER BY r.created_at DESC LIMIT 20
     """, target_id)
@@ -222,11 +194,12 @@ async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_
         vote_type = "👍" if detail['is_positive'] else "👎"
         message += f"{i}. {vote_type} {voter_name}"
         
-        if detail['tag_ids']:
+        # FIX: Changed tag_ids to tag_id
+        if detail['tag_id']:
             tag_names = []
-            for tag_id in detail['tag_ids']:
-                if tag_id in tag_dict:
-                    tag_info = tag_dict[tag_id]
+            for tag_id_item in detail['tag_id']:
+                if tag_id_item in tag_dict:
+                    tag_info = tag_dict[tag_id_item]
                     emoji = "🏅" if tag_info['type'] == 'recommend' else "⚠️"
                     tag_names.append(f"{emoji}{tag_info['name']}")
             if tag_names: message += f" [{', '.join(tag_names)}]"
@@ -338,7 +311,8 @@ async def handle_vote_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     existing_vote = None
     if action == "edit":
-        existing_vote = await db_fetch_one("SELECT is_positive, tag_ids, comment FROM reputations WHERE target_id = $1 AND voter_id = $2", target_id, user_id)
+        # FIX: Changed tag_ids to tag_id
+        existing_vote = await db_fetch_one("SELECT is_positive, tag_id, comment FROM reputations WHERE target_id = $1 AND voter_id = $2", target_id, user_id)
         if existing_vote:
             is_positive = existing_vote['is_positive']
             vote_type_text = "好评" if is_positive else "差评"
@@ -347,7 +321,8 @@ async def handle_vote_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     message = f"📝 给 **{display_name}** 评价 - {vote_type_text}\n\n选择适合的标签 (可多选)，然后提交评价："
     keyboard = []
-    selected_tags = existing_vote['tag_ids'] if existing_vote else []
+    # FIX: Changed tag_ids to tag_id
+    selected_tags = existing_vote['tag_id'] if existing_vote else []
     
     for i in range(0, len(tags), 2):
         row = []
@@ -418,9 +393,10 @@ async def handle_vote_submit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         async with db_transaction() as conn:
+            # FIX: Changed tag_ids to tag_id
             await conn.execute("""
-                INSERT INTO reputations (target_id, voter_id, is_positive, tag_ids, comment) VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (target_id, voter_id) DO UPDATE SET is_positive = $3, tag_ids = $4, comment = $5, created_at = NOW()
+                INSERT INTO reputations (target_id, voter_id, is_positive, tag_id, comment) VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (target_id, voter_id) DO UPDATE SET is_positive = $3, tag_id = $4, comment = $5, created_at = NOW()
             """, target_id, user_id, is_positive, selected_tags, comment)
         
         if 'current_vote' in context.user_data: del context.user_data['current_vote']
