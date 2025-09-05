@@ -3,8 +3,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
+# 核心修正：添加了 db_fetch_val 的导入
 from database import (
-    db_fetch_one, db_execute, db_fetch_all, get_or_create_user
+    db_fetch_one, db_execute, db_fetch_all, get_or_create_user, db_fetch_val
 )
 from .utils import schedule_message_deletion
 
@@ -90,7 +91,6 @@ async def build_reputation_card_data(target_user_pkid: int, origin: str = "") ->
     else:
         display_name = f"用户 {user_info['pkid']}"
 
-    # 核心改动：从新表 evaluations 中统计
     recommend_count = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend'", target_user_pkid)
     block_count = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'block'", target_user_pkid)
     favorite_count = await db_fetch_val("SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1", target_user_pkid)
@@ -146,7 +146,6 @@ async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, targe
         return
 
     try:
-        # 核心改动：使用 INSERT ... ON CONFLICT ... DO UPDATE 实现“插入或更新”
         sql = """
             INSERT INTO evaluations (voter_user_pkid, target_user_pkid, tag_id, type)
             VALUES ($1, $2, $3, $4)
