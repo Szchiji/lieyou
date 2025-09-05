@@ -22,7 +22,8 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-from database import init_db, get_pool, get_setting
+# 修正：从 database 导入 is_admin
+from database import init_db, get_pool, get_setting, get_or_create_user, is_admin
 from handlers.reputation import handle_query, vote_menu, process_vote, back_to_rep_card, send_reputation_card
 from handlers.leaderboard import leaderboard_menu, refresh_leaderboard, admin_clear_leaderboard_cache
 from handlers.favorites import add_favorite, remove_favorite, my_favorites_list
@@ -41,19 +42,36 @@ TELEGRAM_BOT_TOKEN = environ["TELEGRAM_BOT_TOKEN"]
 RENDER_EXTERNAL_URL = environ.get("RENDER_EXTERNAL_URL")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.callback_query.message
+    """
+    显示主菜单。
+    '管理面板' 按钮只对管理员可见。
+    """
+    user = update.effective_user
+    message = update.effective_message or update.callback_query.message
+    
+    # 确保用户存在于数据库中
+    await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
+
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
+    
+    # 构建基础键盘
     keyboard = [
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
         [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
         [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
-        [InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")]
     ]
+    
+    # 检查用户是否为管理员
+    if await is_admin(user.id):
+        keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
+    
     if update.callback_query:
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
         await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'waiting_for' in context.user_data:
@@ -64,6 +82,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     data = query.data
+    
+    # 确保执行操作的用户存在于数据库
+    await get_or_create_user(
+        user_id=query.from_user.id, 
+        username=query.from_user.username, 
+        first_name=query.from_user.first_name
+    )
     
     simple_handlers = {
         "back_to_help": start_command,
@@ -89,7 +114,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await simple_handlers[data](update, context)
         return
 
-    # 修正：所有 m[index] 的索引都从 0 开始
     patterns = {
         r"leaderboard_(top|bottom)_(\d+)": lambda m: leaderboard_menu(update, context, m[0], int(m[1])),
         r"leaderboard_refresh_(top|bottom)_(\d+)": lambda m: refresh_leaderboard(update, context, m[0], int(m[1])),
@@ -97,7 +121,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         r"vote_(recommend|block)_(\d+)_(\d+)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2])),
         r"process_vote_(\d+)_(.+)": lambda m: process_vote(update, context, int(m[0]), m[1]),
         r"back_to_rep_card_(\d+)": lambda m: back_to_rep_card(update, context, int(m[0])),
-        r"rep_card_query_(\d+)": lambda m: send_reputation_card(query, context, int(m[0])),
+        r"rep_card_query_(\d+)": lambda m: send_reputation_card(update, context, int(m[0])),
         r"add_favorite_(\d+)": lambda m: add_favorite(update, context, int(m[0])),
         r"remove_favorite_(\d+)": lambda m: remove_favorite(update, context, int(m[0])),
         r"stats_user_(\d+)(?:_(\d+))?": lambda m: user_stats_menu(update, context, int(m[0]), int(m[1] or 1)),
@@ -117,8 +141,8 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if match:
             await handler(match.groups())
             return
-            
-    logger.warning(f"未处理的回调查询: {data}")
+    
+    logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
 
 ptb_app = None
 
@@ -129,7 +153,7 @@ async def lifespan(app: FastAPI):
 
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
-    ptb_app.add_handler(CommandHandler("myfavorites", lambda u, c: my_favorites_list(u, c, 1), filters=filters.ChatType.PRIVATE))
+    ptb_app.add_handler(CommandHandler("myfavorites", my_favorites_list, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
@@ -170,14 +194,5 @@ def index():
     return {"status": "ok", "bot": "神谕者机器人正在运行"}
 
 if __name__ == "__main__":
-    if not RENDER_EXTERNAL_URL:
-        logger.info("以轮询模式在本地启动机器人...")
-        import asyncio
-        local_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        local_app.add_handler(CommandHandler("start", start_command))
-        # ... (rest of local handlers)
-        asyncio.run(init_db())
-        local_app.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        port = int(environ.get("PORT", 8000))
-        uvicorn.run("main:fastapi_app", host="0.0.0.0", port=port, reload=False)
+    port = int(environ.get("PORT", 8000))
+    uvicorn.run("main:fastapi_app", host="0.0.0.0", port=port, reload=False)
