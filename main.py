@@ -40,12 +40,8 @@ from handlers.admin import (
 TELEGRAM_BOT_TOKEN = environ["TELEGRAM_BOT_TOKEN"]
 RENDER_EXTERNAL_URL = environ.get("RENDER_EXTERNAL_URL")
 
-# --- 新增：全局错误处理器 ---
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """记录所有由更新引起的错误，并向用户发送通知（如果可能）。"""
     logger.error("处理更新时发生异常", exc_info=context.error)
-    
-    # 尝试通知用户发生了错误
     if isinstance(update, Update) and update.effective_chat:
         try:
             await context.bot.send_message(
@@ -137,9 +133,7 @@ async def lifespan(app: FastAPI):
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # --- 注册全局错误处理器 ---
     ptb_app.add_error_handler(error_handler)
-
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites_list, filters=filters.ChatType.PRIVATE))
