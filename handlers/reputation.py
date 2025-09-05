@@ -1,477 +1,270 @@
 import logging
 import re
-from typing import List, Dict, Optional
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from database import (
-    db_fetch_all, db_fetch_one, db_fetchval, db_execute, db_transaction,
-    update_user_activity, get_or_create_user_by_username
+    db_transaction, db_fetch_one, db_fetch_all, db_fetchval,
+    update_user_activity, get_setting
 )
+from .utils import schedule_message_deletion
 
 logger = logging.getLogger(__name__)
 
-async def handle_nomination(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理群聊中的@用户提名"""
-    message_text = update.message.text
-    user_id = update.effective_user.id
-    
-    await update_user_activity(user_id, update.effective_user.username, update.effective_user.first_name)
-    
-    username_match = re.search(r'@(\w{5,})', message_text)
-    if not username_match:
-        return
-    
-    username = username_match.group(1)
-    
-    target_user = await get_or_create_user_by_username(username)
-    if not target_user:
-        await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
-        return
-    
-    if target_user['id'] == user_id:
-        await update.message.reply_text("🚫 不能对自己进行评价。")
-        return
-    
-    await show_reputation_summary(update, context, target_user['id'], from_query=True)
+# --- 主查询入口 ---
 
-async def handle_username_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理私聊中的用户名查询"""
-    message_text = update.message.text
-    user_id = update.effective_user.id
-    
-    await update_user_activity(user_id, update.effective_user.username, update.effective_user.first_name)
-    
-    username_match = re.search(r'查询\s+@(\w{5,})', message_text)
-    if not username_match:
-        return
-    
-    username = username_match.group(1)
-    
-    target_user = await get_or_create_user_by_username(username)
-    if not target_user:
-        await update.message.reply_text(f"❌ 处理用户 @{username} 时出错，请稍后重试。")
+async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理对用户声誉的查询 (通过 @username, user_id, 或回复消息)"""
+    query_user = update.effective_user
+    await update_user_activity(query_user.id, query_user.username, query_user.first_name)
+
+    target_user_id = None
+    target_username = None
+
+    # 1. 检查是否回复消息
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        target_user_id = target_user.id
+        await update_user_activity(target_user.id, target_user.username, target_user.first_name)
+
+    # 2. 检查消息文本中的 @username 或 user_id
+    else:
+        # 移除了 '查询' 关键字要求，直接匹配 @ 或数字
+        match = re.search(r'@(\w+)|(\d{5,})', update.message.text)
+        if match:
+            if match.group(1): # @username
+                target_username = match.group(1)
+                user_data = await db_fetch_one("SELECT id FROM users WHERE username = $1", target_username)
+                if user_data:
+                    target_user_id = user_data['id']
+                else:
+                    await update.message.reply_text(f"我还没有关于 @{target_username} 的信息。")
+                    return
+            elif match.group(2): # user_id
+                try:
+                    target_user_id = int(match.group(2))
+                    # 验证用户是否存在
+                    if not await db_fetch_one("SELECT id FROM users WHERE id = $1", target_user_id):
+                        await update.message.reply_text(f"我还没有关于用户ID {target_user_id} 的信息。")
+                        return
+                except ValueError:
+                    pass # 不是有效的ID
+
+    if not target_user_id:
+        # 如果没有明确目标，显示帮助或自己的信息
+        await show_help_or_self_rep(update, context)
         return
 
-    if target_user['id'] == user_id:
-        await update.message.reply_text("🚫 不能查询自己的声誉。")
-        return
-    
-    await show_reputation_summary(update, context, target_user['id'], from_query=True)
+    # 生成并发送声誉卡片
+    await send_reputation_card(update, context, target_user_id)
 
-async def show_reputation_summary(update: Update, context: ContextTypes.DEFAULT_TYPE, target_id: int = None, from_query: bool = False):
-    """显示用户声誉概览"""
-    query = update.callback_query
+async def show_help_or_self_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """在没有明确查询目标时，显示帮助信息或用户自己的声誉"""
+    # 在这个版本，我们简化为只显示帮助信息
+    start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
+    keyboard = [
+        [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
+        [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
+        [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
+        [InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    sent_message = await update.message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    await schedule_message_deletion(context, sent_message.chat.id, sent_message.message_id)
+
+# --- 声誉卡片生成与发送 ---
+
+async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """生成并发送指定用户的声誉卡片"""
+    try:
+        card_data = await build_reputation_card_data(target_user_id)
+        if not card_data:
+            await update.message.reply_text("无法获取该用户的声誉信息。")
+            return
+
+        is_favorite = await db_fetch_one("SELECT 1 FROM favorites WHERE user_id = $1 AND target_user_id = $2", update.effective_user.id, target_user_id)
+        
+        text, keyboard = format_reputation_card(card_data, is_favorite)
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        sent_message = await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        
+        # 安排消息自动删除
+        await schedule_message_deletion(context, sent_message.chat.id, sent_message.message_id)
+
+    except Exception as e:
+        logger.error(f"发送声誉卡片失败 (用户ID: {target_user_id}): {e}", exc_info=True)
+        await update.message.reply_text("❌ 生成声誉卡片时出错。")
+
+async def build_reputation_card_data(target_user_id: int):
+    """从数据库收集构建声誉卡片所需的数据"""
+    query = """
+    WITH user_info AS (
+        SELECT id, first_name, username FROM users WHERE id = $1
+    ),
+    votes_summary AS (
+        SELECT
+            t.type,
+            t.name,
+            COUNT(v.id) as count
+        FROM votes v
+        JOIN tags t ON v.tag_id = t.id
+        WHERE v.target_user_id = $1
+        GROUP BY t.type, t.name
+    ),
+    recommend_votes AS (
+        SELECT name, count FROM votes_summary WHERE type = 'recommend' ORDER BY count DESC, name ASC
+    ),
+    block_votes AS (
+        SELECT name, count FROM votes_summary WHERE type = 'block' ORDER BY count DESC, name ASC
+    )
+    SELECT
+        (SELECT * FROM user_info) as user_data,
+        (SELECT COALESCE(json_agg(reco), '[]'::json) FROM recommend_votes reco) as recommend_tags,
+        (SELECT COALESCE(json_agg(bl), '[]'::json) FROM block_votes bl) as block_tags;
+    """
+    data = await db_fetch_one(query, target_user_id)
     
-    if target_id is None and query:
-        data_parts = query.data.split("_")
-        target_id = int(data_parts[2])
-    
-    if query and not from_query:
-        await query.answer()
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    if not target_user:
-        error_msg = "❌ 用户不存在"
-        if from_query:
-            await update.message.reply_text(error_msg)
+    if not data or not data['user_data']:
+        # 如果用户在votes表里有记录但在users表里没有，需要补充信息
+        user_in_votes = await db_fetchval("SELECT 1 FROM votes WHERE target_user_id = $1 LIMIT 1", target_user_id)
+        if user_in_votes:
+            # 这是一个边缘情况，最好有一个用户数据同步机制
+            await update_user_activity(target_user_id, None, f"用户{target_user_id}")
+            # 再次尝试获取数据
+            data = await db_fetch_one(query, target_user_id)
+            if not data or not data['user_data']:
+                return None
         else:
-            await query.edit_message_text(error_msg)
+            return None # 用户确实不存在
+
+    return data
+
+def format_reputation_card(data: dict, is_favorite: bool):
+    """将数据格式化为文本和键盘布局"""
+    user_data = data['user_data']
+    recommend_tags = data['recommend_tags']
+    block_tags = data['block_tags']
+
+    display_name = user_data['first_name'] or (f"@{user_data['username']}" if user_data['username'] else f"用户{user_data['id']}")
+    
+    total_recommend = sum(tag['count'] for tag in recommend_tags)
+    total_block = sum(tag['count'] for tag in block_tags)
+    net_score = total_recommend - total_block
+
+    # 构建文本
+    text = f"**声誉档案 - {display_name}**\n"
+    text += f"综合评价: **{net_score}** (👍{total_recommend} / 👎{total_block})\n\n"
+
+    if recommend_tags:
+        text += "👍 **收到好评:**\n"
+        text += "、".join([f"{tag['name']} ({tag['count']})" for tag in recommend_tags]) + "\n\n"
+    
+    if block_tags:
+        text += "👎 **收到差评:**\n"
+        text += "、".join([f"{tag['name']} ({tag['count']})" for tag in block_tags]) + "\n\n"
+
+    if not recommend_tags and not block_tags:
+        text += "*暂无评价记录。*\n\n"
+
+    text += f"_(用户ID: `{user_data['id']}`)_"
+
+    # 构建键盘
+    favorite_text = "❤️ 已收藏" if is_favorite else "🤍 添加收藏"
+    favorite_callback = "remove_favorite_" if is_favorite else "add_favorite_"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("👍 给好评", callback_data=f"vote_recommend_{user_data['id']}_1"),
+            InlineKeyboardButton("👎 给差评", callback_data=f"vote_block_{user_data['id']}_1")
+        ],
+        [
+            InlineKeyboardButton(favorite_text, callback_data=f"{favorite_callback}{user_data['id']}"),
+            InlineKeyboardButton("📊 统计", callback_data=f"stats_user_{user_data['id']}")
+        ]
+    ]
+    return text, keyboard
+
+# --- 投票处理 ---
+
+async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int, vote_type: str, page: int):
+    """显示好评或差评的标签菜单以供选择"""
+    query = update.callback_query
+    await query.answer()
+
+    tags = await db_fetch_all("SELECT name FROM tags WHERE type = $1 ORDER BY name", vote_type)
+    if not tags:
+        await query.answer("管理员尚未设置任何标签！", show_alert=True)
         return
-    
-    stats = await db_fetch_one("""
-        SELECT 
-            COUNT(*) as total_votes,
-            COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_votes,
-            COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_votes,
-            COUNT(DISTINCT voter_id) as unique_voters
-        FROM reputations WHERE target_id = $1
-    """, target_id)
-    
-    total_votes = stats['total_votes'] or 0
-    positive_votes = stats['positive_votes'] or 0
-    negative_votes = stats['negative_votes'] or 0
-    
-    reputation_score = round((positive_votes / total_votes) * 100) if total_votes > 0 else 0
-    
-    username = target_user.get('username')
-    display_name = target_user.get('first_name') or (f"@{username}" if username else f"用户{target_id}")
-    clean_username = username or display_name
-    
-    if len(clean_username) > 15:
-        clean_username = clean_username[:12] + "..."
-
-    if total_votes == 0: reputation_desc, reputation_icon = "中立 (0)", "⚖️"
-    elif reputation_score >= 90: reputation_desc, reputation_icon = f"极佳声誉 ({reputation_score}%)", "🌟"
-    elif reputation_score >= 75: reputation_desc, reputation_icon = f"良好声誉 ({reputation_score}%)", "✅"
-    elif reputation_score >= 60: reputation_desc, reputation_icon = f"一般声誉 ({reputation_score}%)", "⚖️"
-    elif reputation_score >= 40: reputation_desc, reputation_icon = f"较差声誉 ({reputation_score}%)", "⚠️"
-    else: reputation_desc, reputation_icon = f"负面声誉 ({reputation_score}%)", "💀"
-    
-    message = f"┏━━━━「 📜 神谕之卷 」━━━━┓\n"
-    message += f"┃                          ┃\n"
-    message += f"┃  👤 求问对象: @{clean_username}   ┃\n"
-    message += f"┃                          ┃\n"
-    message += f"┃  👍 赞誉: {positive_votes} 次        ┃\n"
-    message += f"┃  👎 警示: {negative_votes} 次        ┃\n"
-    message += f"┃  {reputation_icon} 神谕判定: {reputation_desc}  ┃\n"
-    message += f"┃                          ┃\n"
-    message += f"┗━━━━━━━━━━━━━━━━━━┛"
+        
+    vote_type_text = "好评" if vote_type == "recommend" else "差评"
     
     keyboard = []
+    for tag in tags:
+        keyboard.append([InlineKeyboardButton(tag['name'], callback_data=f"process_vote_{target_user_id}_{tag['name']}")])
     
-    if total_votes > 0:
-        keyboard.append([
-            InlineKeyboardButton("📝 详细评价", callback_data=f"rep_detail_{target_id}"),
-            InlineKeyboardButton("👥 评价者", callback_data=f"rep_voters_menu_{target_id}_1")
-        ])
+    keyboard.append([InlineKeyboardButton("🔙 返回声誉卡片", callback_data=f"back_to_rep_card_{target_user_id}")])
     
-    current_user_id = update.effective_user.id
-    if target_id != current_user_id:
-        action_buttons = []
-        # FIX: Changed tag_ids to tag_id
-        existing_vote = await db_fetch_one(
-            "SELECT is_positive, tag_id FROM reputations WHERE target_id = $1 AND voter_id = $2",
-            target_id, current_user_id
-        )
-        
-        if existing_vote:
-            action_buttons.append(InlineKeyboardButton(f"✏️ 修改评价", callback_data=f"vote_edit_{target_id}"))
-        else:
-            action_buttons.extend([
-                InlineKeyboardButton("👍 好评", callback_data=f"vote_positive_{target_id}"),
-                InlineKeyboardButton("👎 差评", callback_data=f"vote_negative_{target_id}")
-            ])
-        
-        is_favorited = await db_fetchval("SELECT EXISTS(SELECT 1 FROM favorites WHERE user_id = $1 AND target_id = $2)", current_user_id, target_id)
-        fav_text = "💔 取消收藏" if is_favorited else "💖 收藏"
-        action_buttons.append(InlineKeyboardButton(fav_text, callback_data=f"toggle_favorite_{target_id}"))
-        keyboard.append(action_buttons)
-    
-    keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if from_query:
-        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    await query.edit_message_text(f"请为该用户选择一个**{vote_type_text}**标签：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
 
-async def show_reputation_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示详细评价"""
+async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int, tag_name: str):
+    """处理用户的投票选择，并更新数据库"""
     query = update.callback_query
-    await query.answer()
-    
-    data_parts = query.data.split("_")
-    target_id = int(data_parts[2])
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    
-    # FIX: Changed tag_ids to tag_id
-    details = await db_fetch_all("""
-        SELECT r.is_positive, r.tag_id, r.comment, r.created_at, u.first_name, u.username
-        FROM reputations r LEFT JOIN users u ON r.voter_id = u.id
-        WHERE r.target_id = $1 ORDER BY r.created_at DESC LIMIT 20
-    """, target_id)
-    
-    if not details:
-        await query.edit_message_text(f"📝 **{display_name}** 的详细评价\n\n暂无评价记录。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data=f"rep_summary_{target_id}")]]), parse_mode=ParseMode.MARKDOWN)
+    voter_user_id = query.from_user.id
+
+    if voter_user_id == target_user_id:
+        await query.answer("❌ 你不能给自己投票。", show_alert=True)
         return
-    
-    all_tags = await db_fetch_all("SELECT id, name, type FROM tags")
-    tag_dict = {tag['id']: {'name': tag['name'], 'type': tag['type']} for tag in all_tags}
-    
-    message = f"📝 **{display_name}** 的详细评价\n\n"
-    positive_count = sum(1 for d in details if d['is_positive'])
-    negative_count = len(details) - positive_count
-    message += f"👍 好评: {positive_count} 条\n"
-    message += f"👎 差评: {negative_count} 条\n\n"
-    
-    for i, detail in enumerate(details[:10], 1):
-        voter_name = detail['first_name'] or detail['username'] or "匿名用户"
-        vote_type = "👍" if detail['is_positive'] else "👎"
-        message += f"{i}. {vote_type} {voter_name}"
-        
-        # FIX: Changed tag_ids to tag_id
-        if detail['tag_id']:
-            tag_names = []
-            for tag_id_item in detail['tag_id']:
-                if tag_id_item in tag_dict:
-                    tag_info = tag_dict[tag_id_item]
-                    emoji = "🏅" if tag_info['type'] == 'recommend' else "⚠️"
-                    tag_names.append(f"{emoji}{tag_info['name']}")
-            if tag_names: message += f" [{', '.join(tag_names)}]"
-        
-        if detail['comment']:
-            comment = detail['comment'][:50] + "..." if len(detail['comment']) > 50 else detail['comment']
-            message += f"\n   💬 {comment}"
-        message += "\n"
-    
-    if len(details) > 10: message += f"\n... 还有 {len(details) - 10} 条评价"
-    
-    keyboard = [[InlineKeyboardButton("👥 查看评价者", callback_data=f"rep_voters_menu_{target_id}_1")], [InlineKeyboardButton("🔙 返回概览", callback_data=f"rep_summary_{target_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
 
-async def show_voters_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data_parts = query.data.split("_")
-    target_id = int(data_parts[3])
-    page = int(data_parts[4])
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    message = f"👥 **{display_name}** 的评价者\n\n选择查看类型："
-    
-    stats = await db_fetch_one("SELECT COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_count, COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_count FROM reputations WHERE target_id = $1", target_id)
-    positive_count = stats['positive_count'] or 0
-    negative_count = stats['negative_count'] or 0
-    
-    keyboard = []
-    if positive_count > 0: keyboard.append([InlineKeyboardButton(f"👍 好评者 ({positive_count})", callback_data=f"rep_voters_positive_{target_id}_{page}")])
-    if negative_count > 0: keyboard.append([InlineKeyboardButton(f"👎 差评者 ({negative_count})", callback_data=f"rep_voters_negative_{target_id}_{page}")])
-    keyboard.append([InlineKeyboardButton("👥 全部评价者", callback_data=f"rep_voters_all_{target_id}_{page}"), InlineKeyboardButton("🔙 返回", callback_data=f"rep_summary_{target_id}")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-
-async def show_reputation_voters(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data_parts = query.data.split("_")
-    vote_type = data_parts[2]
-    target_id = int(data_parts[3])
-    page = int(data_parts[4])
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    
-    per_page = 8
-    offset = (page - 1) * per_page
-    if vote_type == "positive": where_clause, title = "AND r.is_positive = TRUE", "👍 好评者"
-    elif vote_type == "negative": where_clause, title = "AND r.is_positive = FALSE", "👎 差评者"
-    else: where_clause, title = "", "👥 全部评价者"
-    
-    voters = await db_fetch_all(f"SELECT u.id, u.username, u.first_name, r.is_positive, r.created_at FROM reputations r JOIN users u ON r.voter_id = u.id WHERE r.target_id = $1 {where_clause} ORDER BY r.created_at DESC LIMIT $2 OFFSET $3", target_id, per_page, offset)
-    total_count = await db_fetchval(f"SELECT COUNT(*) FROM reputations r WHERE r.target_id = $1 {where_clause}", target_id)
-    total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
-    
-    message = f"{title} - **{display_name}**\n\n"
-    if not voters: message += "暂无评价者。"
-    else:
-        for i, voter in enumerate(voters, (page - 1) * per_page + 1):
-            voter_name = voter['first_name'] or voter['username'] or f"用户{voter['id']}"
-            vote_icon = "👍" if voter['is_positive'] else "👎"
-            message += f"{i}. {vote_icon} {voter_name}\n"
-        if total_pages > 1: message += f"\n第 {page}/{total_pages} 页"
-    
-    keyboard = []
-    if total_pages > 1:
-        nav_buttons = []
-        if page > 1: nav_buttons.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"rep_voters_{vote_type}_{target_id}_{page-1}"))
-        if page < total_pages: nav_buttons.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"rep_voters_{vote_type}_{target_id}_{page+1}"))
-        if nav_buttons: keyboard.append(nav_buttons)
-    
-    keyboard.append([InlineKeyboardButton("🔄 切换类型", callback_data=f"rep_voters_menu_{target_id}_{page}"), InlineKeyboardButton("🔙 返回概览", callback_data=f"rep_summary_{target_id}")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = update.effective_user.id
-    await update_user_activity(user_id, update.effective_user.username, update.effective_user.first_name)
-    if data.startswith("vote_"): await handle_vote_button(update, context)
-    elif data.startswith("tag_"): await handle_tag_selection(update, context)
-    elif data.startswith("toggle_favorite_"): await handle_favorite_toggle(update, context)
-
-async def handle_vote_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user_id = update.effective_user.id
-    data_parts = data.split("_")
-    action = data_parts[1]
-    target_id = int(data_parts[2])
-    
-    if target_id == user_id: await query.answer("❌ 不能对自己进行评价", show_alert=True); return
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    if not target_user: await query.answer("❌ 用户不存在", show_alert=True); return
-    
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    
-    if action in ["positive", "edit"]:
-        tags = await db_fetch_all("SELECT id, name FROM tags WHERE type = 'recommend' ORDER BY name")
-        vote_type_text, is_positive = "好评", True
-    else:
-        tags = await db_fetch_all("SELECT id, name FROM tags WHERE type = 'block' ORDER BY name")
-        vote_type_text, is_positive = "差评", False
-    
-    existing_vote = None
-    if action == "edit":
-        # FIX: Changed tag_ids to tag_id
-        existing_vote = await db_fetch_one("SELECT is_positive, tag_id, comment FROM reputations WHERE target_id = $1 AND voter_id = $2", target_id, user_id)
-        if existing_vote:
-            is_positive = existing_vote['is_positive']
-            vote_type_text = "好评" if is_positive else "差评"
-            tag_type = 'recommend' if is_positive else 'block'
-            tags = await db_fetch_all("SELECT id, name FROM tags WHERE type = $1 ORDER BY name", tag_type)
-    
-    message = f"📝 给 **{display_name}** 评价 - {vote_type_text}\n\n选择适合的标签 (可多选)，然后提交评价："
-    keyboard = []
-    # FIX: Changed tag_ids to tag_id
-    selected_tags = existing_vote['tag_id'] if existing_vote else []
-    
-    for i in range(0, len(tags), 2):
-        row = []
-        for j in range(2):
-            if i + j < len(tags):
-                tag = tags[i + j]
-                is_selected = tag['id'] in selected_tags
-                prefix = "✅ " if is_selected else ""
-                row.append(InlineKeyboardButton(f"{prefix}{tag['name']}", callback_data=f"tag_toggle_{target_id}_{is_positive}_{tag['id']}"))
-        keyboard.append(row)
-    
-    keyboard.extend([[InlineKeyboardButton("💬 添加评论", callback_data=f"vote_comment_{target_id}_{is_positive}")], [InlineKeyboardButton("✅ 提交评价", callback_data=f"vote_submit_{target_id}_{is_positive}")], [InlineKeyboardButton("❌ 取消", callback_data=f"rep_summary_{target_id}")],])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    context.user_data['current_vote'] = {'target_id': target_id, 'is_positive': is_positive, 'selected_tags': selected_tags, 'comment': existing_vote['comment'] if existing_vote else None}
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-
-async def handle_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    data_parts = data.split("_")
-    target_id = int(data_parts[2])
-    tag_id = int(data_parts[4])
-    
-    current_vote = context.user_data.get('current_vote', {})
-    if current_vote.get('target_id') != target_id: await query.answer("❌ 状态错误，请重新开始", show_alert=True); return
-    
-    selected_tags = current_vote.get('selected_tags', [])
-    if tag_id in selected_tags: selected_tags.remove(tag_id)
-    else: selected_tags.append(tag_id)
-    
-    current_vote['selected_tags'] = selected_tags
-    context.user_data['current_vote'] = current_vote
-    await handle_vote_button(update, context)
-
-async def handle_vote_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    data_parts = data.split("_")
-    target_id = int(data_parts[2])
-    is_positive = data_parts[3] == "True"
-    await query.answer()
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    vote_type_text = "好评" if is_positive else "差评"
-    
-    message = f"💬 **为 {display_name} 添加评论** - {vote_type_text}\n\n请发送您的评论内容（最多200字符）：\n\n发送 /cancel 取消操作"
-    keyboard = [[InlineKeyboardButton("🔙 返回", callback_data=f"vote_{'positive' if is_positive else 'negative'}_{target_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    context.user_data['comment_input'] = {'target_id': target_id, 'is_positive': is_positive}
-
-async def handle_vote_submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
-    user_id = update.effective_user.id
-    data_parts = data.split("_")
-    target_id = int(data_parts[2])
-    is_positive = data_parts[3] == "True"
-    await query.answer()
-    
-    current_vote = context.user_data.get('current_vote', {})
-    if current_vote.get('target_id') != target_id: await query.answer("❌ 状态错误，请重新开始", show_alert=True); return
-    
-    selected_tags = current_vote.get('selected_tags', [])
-    comment = current_vote.get('comment')
-    
     try:
         async with db_transaction() as conn:
-            # FIX: Changed tag_ids to tag_id
-            await conn.execute("""
-                INSERT INTO reputations (target_id, voter_id, is_positive, tag_id, comment) VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (target_id, voter_id) DO UPDATE SET is_positive = $3, tag_id = $4, comment = $5, created_at = NOW()
-            """, target_id, user_id, is_positive, selected_tags, comment)
-        
-        if 'current_vote' in context.user_data: del context.user_data['current_vote']
-        
-        target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-        display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-        vote_type_text = "好评" if is_positive else "差评"
-        
-        message = f"✅ **评价提交成功**\n\n已为 **{display_name}** 提交{vote_type_text}\n"
-        if selected_tags:
-            tags = await db_fetch_all("SELECT id, name, type FROM tags WHERE id = ANY($1)", selected_tags)
-            tag_names = []
-            for tag in tags:
-                emoji = "🏅" if tag['type'] == 'recommend' else "⚠️"
-                tag_names.append(f"{emoji}{tag['name']}")
-            if tag_names: message += f"标签: {', '.join(tag_names)}\n"
-        if comment: message += f"评论: {comment}\n"
-        message += "\n感谢您的评价！"
-        
-        keyboard = [[InlineKeyboardButton("🔍 查看用户信息", callback_data=f"rep_summary_{target_id}")], [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-        
-        try:
-            from handlers.leaderboard import clear_leaderboard_cache
-            clear_leaderboard_cache()
-        except ImportError: pass
-        logger.info(f"用户 {user_id} 为用户 {target_id} 提交了评价")
-    except Exception as e:
-        logger.error(f"提交评价失败: {e}", exc_info=True)
-        await query.answer("❌ 提交评价失败，请重试", show_alert=True)
+            # 获取tag_id
+            tag = await conn.fetchrow("SELECT id, type FROM tags WHERE name = $1", tag_name)
+            if not tag:
+                await query.answer("❌ 标签不存在，可能已被管理员删除。", show_alert=True)
+                return
+            tag_id = tag['id']
+            tag_type = tag['type']
 
-async def handle_favorite_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            # 检查是否已存在相同投票
+            existing_vote = await conn.fetchval(
+                "SELECT id FROM votes WHERE voter_user_id = $1 AND target_user_id = $2 AND tag_id = $3",
+                voter_user_id, target_user_id, tag_id
+            )
+            if existing_vote:
+                await query.answer("❌ 你已经使用这个标签评价过该用户了。", show_alert=True)
+                return
+
+            # 插入新投票
+            await conn.execute(
+                """
+                INSERT INTO votes (voter_user_id, target_user_id, tag_id, message_id, chat_id)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                voter_user_id, target_user_id, tag_id, query.message.message_id, query.message.chat.id
+            )
+            
+            vote_type_text = "好评" if tag_type == "recommend" else "差评"
+            await query.answer(f"✅ {vote_type_text}成功！", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"处理投票失败 (voter: {voter_user_id}, target: {target_user_id}, tag: {tag_name}): {e}")
+        await query.answer("❌ 操作失败，发生数据库错误。", show_alert=True)
+
+    # 投票后刷新声誉卡片
+    await back_to_rep_card(update, context, target_user_id)
+
+async def back_to_rep_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """回调函数，用于从其他菜单返回到声誉卡片"""
     query = update.callback_query
-    data = query.data
-    user_id = update.effective_user.id
-    target_id = int(data.split("_")[2])
-    
-    is_favorited = await db_fetchval("SELECT EXISTS(SELECT 1 FROM favorites WHERE user_id = $1 AND target_id = $2)", user_id, target_id)
-    try:
-        if is_favorited:
-            await db_execute("DELETE FROM favorites WHERE user_id = $1 AND target_id = $2", user_id, target_id)
-            await query.answer("💔 已取消收藏", show_alert=True)
-        else:
-            await db_execute("INSERT INTO favorites (user_id, target_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_id, target_id)
-            await query.answer("💖 已添加到收藏", show_alert=True)
-        await show_reputation_summary(update, context, target_id)
-    except Exception as e:
-        logger.error(f"切换收藏状态失败: {e}")
-        await query.answer("❌ 操作失败", show_alert=True)
+    await query.answer()
 
-async def handle_comment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    comment_input = context.user_data.get('comment_input')
-    if not comment_input: return False
-    
-    comment = update.message.text.strip()
-    if len(comment) > 200:
-        await update.message.reply_text("❌ 评论内容过长，请控制在200字符以内。")
-        return True
-    
-    target_id = comment_input['target_id']
-    is_positive = comment_input['is_positive']
-    
-    current_vote = context.user_data.get('current_vote', {})
-    current_vote['comment'] = comment
-    context.user_data['current_vote'] = current_vote
-    del context.user_data['comment_input']
-    
-    target_user = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1", target_id)
-    display_name = target_user['first_name'] or f"@{target_user['username']}" if target_user['username'] else f"用户{target_id}"
-    vote_type_text = "好评" if is_positive else "差评"
-    
-    message = f"✅ **评论已添加**\n\n为 **{display_name}** 的{vote_type_text}添加了评论：\n💬 {comment}\n\n现在可以提交评价了。"
-    keyboard = [[InlineKeyboardButton("✅ 提交评价", callback_data=f"vote_submit_{target_id}_{is_positive}")], [InlineKeyboardButton("🔙 返回编辑", callback_data=f"vote_{'positive' if is_positive else 'negative'}_{target_id}")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    return True
+    card_data = await build_reputation_card_data(target_user_id)
+    if not card_data:
+        await query.edit_message_text("无法获取该用户的声誉信息。")
+        return
+
+    is_favorite = await db_fetch_one("SELECT 1 FROM favorites WHERE user_id = $1 AND target_user_id = $2", query.from_user.id, target_user_id)
+    text, keyboard = format_reputation_card(card_data, is_favorite)
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
