@@ -74,17 +74,30 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.callback_query.message
     await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
+    
+    # --- 核心修正：根据聊天类型动态构建键盘 ---
     keyboard = [
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1"), InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
-        [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
     ]
-    if await is_admin(user.id):
-        keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
+    
+    # 只在私聊中显示“我的收藏”和“管理面板”
+    if message.chat.type == 'private':
+        keyboard.append([InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")])
+        
+        # 修正了 is_admin 的调用，并确保只在私聊中显示
+        if await is_admin(user.id):
+            keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     is_callback = hasattr(update, 'callback_query') and update.callback_query
     if is_callback:
-        await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        # 确保在群组里点击返回主菜单时，不会因为消息无变化而报错
+        if message.text != start_message or message.reply_markup != reply_markup:
+            try:
+                await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.warning(f"编辑消息返回主菜单失败: {e}")
     else:
         await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
@@ -172,7 +185,6 @@ async def lifespan(app: FastAPI):
         logger.info("Webhook 设置成功。")
 
     await ptb_app.initialize()
-    # 核心修正：移除了画蛇添足的 post_init 和 post_shutdown 调用
     logger.info("PTB Application 初始化完成。机器人已准备就绪！")
     
     yield
