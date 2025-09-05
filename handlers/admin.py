@@ -29,8 +29,7 @@ async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not waiting_for:
         return
 
-    # 根据等待状态分发给具体的处理函数
-    # 已移除 'broadcast_message' 和 'user_id_search'
+    # 根据等待状态分发给具体的处理函数 (已移除占位符)
     handler_map = {
         'new_recommend_tag': process_new_recommend_tag,
         'new_block_tag': process_new_block_tag,
@@ -44,7 +43,6 @@ async def process_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if handler:
         await handler(update, context)
     
-    # 清理等待状态，避免重复触发
     context.user_data.pop('waiting_for', None)
 
 async def god_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
