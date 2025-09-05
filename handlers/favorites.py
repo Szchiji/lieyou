@@ -2,79 +2,123 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from math import ceil
+from telegram.constants import ParseMode
 
-from database import get_or_create_user, db_execute, db_fetch_all, db_fetch_one
-from .reputation import send_reputation_card
+# 导入新的用户处理函数和声誉卡片函数
+from database import get_or_create_user, db_execute, db_fetch_all
+from handlers.reputation import send_reputation_card
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
 
 async def add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str):
+    """将一个目标添加到用户的收藏夹。"""
     query = update.callback_query
-    user = await get_or_create_user(user_id=query.from_user.id)
     
     try:
-        await db_execute("INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING", user['pkid'], target_user_pkid)
-        await query.answer("❤️ 已收藏！")
+        # 获取操作者信息，如果操作者没有用户名，会抛出 ValueError
+        from_user = await get_or_create_user(query.from_user)
+    except ValueError as e:
+        await query.answer(f"❌ 操作失败: {e}", show_alert=True)
+        return
+
+    if from_user['pkid'] == target_user_pkid:
+        await query.answer("🤔 你不能收藏自己哦。", show_alert=True)
+        return
+
+    try:
+        await db_execute(
+            "INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            from_user['pkid'], target_user_pkid
+        )
+        await query.answer("❤️ 已收藏！", show_alert=True)
     except Exception as e:
         logger.error(f"添加收藏失败: {e}", exc_info=True)
         await query.answer("❌ 添加收藏失败。", show_alert=True)
-        
+
+    # 操作完成后，刷新声誉卡片
     await send_reputation_card(update, context, target_user_pkid, origin)
 
+
 async def remove_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str):
+    """从用户的收藏夹中移除一个目标。"""
     query = update.callback_query
-    user = await get_or_create_user(user_id=query.from_user.id)
 
     try:
-        await db_execute("DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2", user['pkid'], target_user_pkid)
-        await query.answer("💔 已取消收藏。")
+        from_user = await get_or_create_user(query.from_user)
+    except ValueError as e:
+        await query.answer(f"❌ 操作失败: {e}", show_alert=True)
+        return
+
+    try:
+        await db_execute(
+            "DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+            from_user['pkid'], target_user_pkid
+        )
+        await query.answer("💔 已取消收藏。", show_alert=True)
     except Exception as e:
-        logger.error(f"取消收藏失败: {e}", exc_info=True)
+        logger.error(f"移除收藏失败: {e}", exc_info=True)
         await query.answer("❌ 取消收藏失败。", show_alert=True)
-        
-    # 如果是从收藏列表页过来的，刷新收藏列表
+
+    # 如果是从收藏列表里移除，则刷新收藏列表
     if origin and origin.startswith("fav_"):
         page = int(origin.split('_')[1])
         await my_favorites(update, context, page)
     else: # 否则，刷新声誉卡片
         await send_reputation_card(update, context, target_user_pkid, origin)
 
+
 async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
+    """显示用户的收藏列表。"""
     query = update.callback_query
-    user = await get_or_create_user(user_id=query.from_user.id)
+    
+    try:
+        user = await get_or_create_user(query.from_user)
+    except ValueError as e:
+        # 如果用户没有用户名，明确提示
+        await query.answer(f"❌ 操作失败: {e}", show_alert=True)
+        await query.message.edit_text(f"❌ 操作失败: {e}\n\n你需要设置一个Telegram用户名才能使用收藏功能。")
+        return
 
-    total_fav_rec = await db_fetch_one("SELECT COUNT(*) as count FROM favorites WHERE user_pkid = $1", user['pkid'])
-    total_count = total_fav_rec.get('count', 0)
-    total_pages = ceil(total_count / PAGE_SIZE) if total_count > 0 else 1
-    page = max(1, min(page, total_pages))
-    offset = (page - 1) * PAGE_SIZE
-
-    fav_users = await db_fetch_all("""
-        SELECT u.pkid, u.first_name, u.username
+    favorites = await db_fetch_all("""
+        SELECT u.pkid, u.username
         FROM favorites f
         JOIN users u ON f.target_user_pkid = u.pkid
         WHERE f.user_pkid = $1
         ORDER BY f.created_at DESC
-        LIMIT $2 OFFSET $3
-    """, user['pkid'], PAGE_SIZE, offset)
-
-    text = f"❤️ **我的收藏** (共 {total_count} 个)\n\n"
-    keyboard = []
-    if not fav_users:
-        text += "_你还没有收藏任何人。_"
-    else:
-        for fav_user in fav_users:
-            display_name = f"@{fav_user['username']}" if fav_user['username'] else fav_user['first_name']
-            # origin 'fav_{page}' 用于告知声誉卡片，返回时应回到收藏列表的哪一页
-            keyboard.append([InlineKeyboardButton(display_name, callback_data=f"back_to_rep_card_{fav_user['pkid']}_fav_{page}")])
-
-    pagination = []
-    if page > 1: pagination.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"my_favorites_{page-1}"))
-    if page < total_pages: pagination.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"my_favorites_{page+1}"))
-    if pagination: keyboard.append(pagination)
+    """, user['pkid'])
     
+    total_count = len(favorites)
+    total_pages = ceil(total_count / PAGE_SIZE) if total_count > 0 else 1
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+    
+    favorites_on_page = favorites[offset : offset + PAGE_SIZE]
+    
+    text = f"**❤️ 我的收藏** \\(第 {page}/{total_pages} 页\\)\n\n"
+    
+    if not favorites_on_page:
+        text += "_你还没有收藏任何目标_\\.\n\n你可以通过声誉卡片上的“❤️ 添加收藏”按钮来收藏。"
+    
+    keyboard = []
+    for fav in favorites_on_page:
+        # 'origin' 告诉声誉卡片，当返回时应该回到收藏列表的哪一页
+        origin = f"fav_{page}"
+        # 对用户名中的特殊字符进行转义
+        safe_username = fav['username'].replace('_', '\\_').replace('*', '\\*')
+        keyboard.append([
+            InlineKeyboardButton(f"@{safe_username}", callback_data=f"back_to_rep_card_{fav['pkid']}_{origin}")
+        ])
+        
+    pagination = []
+    if page > 1:
+        pagination.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"my_favorites_{page-1}"))
+    if page < total_pages:
+        pagination.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"my_favorites_{page+1}"))
+    if pagination:
+        keyboard.append(pagination)
+        
     keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
