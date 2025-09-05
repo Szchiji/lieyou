@@ -2,11 +2,12 @@ import logging
 import re
 from os import environ
 from contextlib import asynccontextmanager
-import uvicorn # 导入 uvicorn
+import uvicorn
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
-from telegram import Update
+# 修正：在这里添加 InlineKeyboardButton 和 InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters, ApplicationBuilder
@@ -47,7 +48,6 @@ RENDER_EXTERNAL_URL = environ.get("RENDER_EXTERNAL_URL")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 和 /help 命令"""
-    # 确保 update.message 存在
     message = update.message or update.callback_query.message
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
     keyboard = [
@@ -57,7 +57,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    # 使用 edit_message_text 替换，如果它来自回调查询
+    if update.callback_query:
+        await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    else:
+        await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /cancel 命令"""
@@ -70,10 +74,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """解析所有回调查询并分发到对应的函数"""
     query = update.callback_query
-    await query.answer() # 在开始时应答，避免超时
+    await query.answer()
     data = query.data
     
-    # 简单的命令
     simple_handlers = {
         "back_to_help": start_command,
         "admin_settings_menu": settings_menu,
@@ -98,7 +101,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await simple_handlers[data](update, context)
         return
 
-    # 带参数的命令
     patterns = {
         r"leaderboard_(top|bottom)_(\d+)": lambda m: leaderboard_menu(update, context, m[1], int(m[2])),
         r"leaderboard_refresh_(top|bottom)_(\d+)": lambda m: refresh_leaderboard(update, context, m[1], int(m[2])),
@@ -130,56 +132,45 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     logger.warning(f"未处理的回调查询: {data}")
 
 # --- FastAPI Web 应用设置 ---
-
 ptb_app = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- 启动逻辑 ---
-    await init_db()
-    
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # 命令处理器
+    # 注册处理器
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
-    ptb_app.add_handler(CommandHandler("myfavorites", lambda u, c: my_favorites_list(u, c, 1)))
-    ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure))
+    ptb_app.add_handler(CommandHandler("myfavorites", lambda u, c: my_favorites_list(u, c, 1), filters=filters.ChatType.PRIVATE))
+    ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
-
-    # 消息处理器
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
-
-    # 回调查询处理器
     ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
 
+    # 初始化数据库和 Webhook
+    await init_db()
     if RENDER_EXTERNAL_URL:
         await ptb_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook", allowed_updates=Update.ALL_TYPES)
         logger.info(f"Webhook已设置为: {RENDER_EXTERNAL_URL}/webhook")
     
-    # 初始化 ptb_app
     await ptb_app.initialize()
-    if ptb_app.post_init:
-        await ptb_app.post_init(ptb_app)
+    if ptb_app.post_init: await ptb_app.post_init(ptb_app)
     
     yield
-    # --- 清理逻辑 ---
-    if ptb_app.post_shutdown:
-        await ptb_app.post_shutdown(ptb_app)
+    
+    # 清理逻辑
+    if ptb_app.post_shutdown: await ptb_app.post_shutdown(ptb_app)
     await ptb_app.shutdown()
     db_pool = await get_pool()
-    if db_pool:
-        await db_pool.close()
-        logger.info("数据库连接池已关闭。")
+    if db_pool: await db_pool.close(); logger.info("数据库连接池已关闭。")
 
 fastapi_app = FastAPI(lifespan=lifespan)
 
 @fastapi_app.post("/webhook")
 async def webhook(request: Request):
-    """处理来自Telegram的webhook请求"""
     try:
         data = await request.json()
         update = Update.de_json(data, ptb_app.bot)
@@ -194,37 +185,26 @@ def index():
     return {"status": "ok", "bot": "神谕者机器人正在运行"}
 
 # --- 启动逻辑 ---
-# 彻底修改 if __name__ == "__main__" 部分
 if __name__ == "__main__":
-    # 如果 RENDER_EXTERNAL_URL 存在，说明是在 Render 环境
-    # 否则，是在本地开发
-    if RENDER_EXTERNAL_URL:
-        # 在 Render 上，我们期望由 uvicorn 从 Procfile 启动
-        # 这部分代码理论上不应该被执行，但作为一个保险
-        logger.info("在生产环境检测到直接运行，将使用 Uvicorn 启动。")
-        port = int(environ.get("PORT", 8000))
-        uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
-    else:
-        # 在本地开发，我们使用 polling 模式
-        logger.info("未检测到 RENDER_EXTERNAL_URL，以轮询模式在本地启动机器人...")
+    if not RENDER_EXTERNAL_URL:
+        logger.info("以轮询模式在本地启动机器人...")
+        import asyncio
         
-        # 创建一个新的 Application 实例用于轮询
         local_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-        # 注册所有处理器 (与 lifespan 中相同)
+        # 注册处理器
         local_app.add_handler(CommandHandler("start", start_command))
         local_app.add_handler(CommandHandler("help", start_command))
-        local_app.add_handler(CommandHandler("myfavorites", lambda u, c: my_favorites_list(u, c, 1)))
-        local_app.add_handler(CommandHandler("erase_my_data", request_data_erasure))
+        local_app.add_handler(CommandHandler("myfavorites", lambda u, c: my_favorites_list(u, c, 1), filters=filters.ChatType.PRIVATE))
+        local_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
         local_app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.ChatType.PRIVATE))
         local_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
         local_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
         local_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
         local_app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-        # 在运行前初始化数据库
-        import asyncio
         asyncio.run(init_db())
-        
-        # 启动轮询
         local_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    else:
+        # 在生产环境，由 uvicorn 启动
+        port = int(environ.get("PORT", 8000))
+        uvicorn.run("main:fastapi_app", host="0.0.0.0", port=port, reload=False)
