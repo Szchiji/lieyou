@@ -38,7 +38,7 @@ from handlers.admin import (
     settings_menu, 
     process_admin_input,
     tags_panel, 
-    mottos_panel,
+    # mottos_panel, # 已移除
     permissions_panel, 
     system_settings_panel, 
     leaderboard_panel,
@@ -46,11 +46,11 @@ from handlers.admin import (
     remove_tag_menu, 
     remove_tag_confirm, 
     list_all_tags,
-    add_motto_prompt,
-    list_mottos,
-    remove_motto_menu,
-    confirm_motto_deletion,
-    execute_motto_deletion,
+    # add_motto_prompt, # 已移除
+    # list_mottos, # 已移除
+    # remove_motto_menu, # 已移除
+    # confirm_motto_deletion, # 已移除
+    # execute_motto_deletion, # 已移除
     add_admin_prompt, 
     list_admins, 
     remove_admin_menu, 
@@ -160,7 +160,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """统一的按钮回调处理器"""
     query = update.callback_query
     
-    # 尝试应答查询，防止超时
     try:
         await query.answer()
     except TimedOut:
@@ -201,25 +200,6 @@ async def all_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await execute_tag_deletion(update, context, tag_id)
             elif data == "admin_tags_list":
                 await list_all_tags(update, context)
-            
-            # 箴言便签管理
-            elif data == "admin_panel_mottos":
-                await mottos_panel(update, context)
-            elif data == "admin_add_motto_prompt":
-                await add_motto_prompt(update, context)
-            elif data == "admin_list_mottos":
-                await list_mottos(update, context)
-            elif data.startswith("admin_remove_motto_menu_"):
-                page = int(data.split("_")[-1])
-                await remove_motto_menu(update, context, page)
-            elif data.startswith("admin_motto_delete_confirm_"):
-                parts = data.split("_")
-                motto_id = int(parts[-2])
-                page = int(parts[-1])
-                await confirm_motto_deletion(update, context, motto_id, page)
-            elif data.startswith("admin_motto_delete_"):
-                motto_id = int(data.split("_")[-1])
-                await execute_motto_deletion(update, context, motto_id)
             
             # 权限管理
             elif data == "admin_panel_permissions":
@@ -346,20 +326,12 @@ async def execute_tag_deletion(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     
     try:
-        # 获取标签信息
         tag_info = await db_fetch_one("SELECT name, type FROM tags WHERE id = $1", tag_id)
         
         if not tag_info:
-            await query.edit_message_text(
-                "❌ 标签不存在或已被删除。",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")
-                ]]),
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text("❌ 标签不存在或已被删除。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")]]), parse_mode='Markdown')
             return
         
-        # 删除标签
         await db_execute("DELETE FROM tags WHERE id = $1", tag_id)
         
         type_name = "推荐" if tag_info['type'] == 'recommend' else "警告"
@@ -368,46 +340,24 @@ async def execute_tag_deletion(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard = [[InlineKeyboardButton("🔙 返回标签管理", callback_data="admin_panel_tags")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         logger.info(f"管理员 {update.effective_user.id} 删除了标签 {tag_info['name']} (ID: {tag_id})")
         
     except Exception as e:
         logger.error(f"删除标签失败: {e}", exc_info=True)
-        await query.edit_message_text(
-            "❌ 删除标签失败，请重试。",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")
-            ]]),
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("❌ 删除标签失败，请重试。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_tags")]]), parse_mode='Markdown')
 
 async def execute_admin_removal(update: Update, context: ContextTypes.DEFAULT_TYPE, admin_id: int):
     """执行管理员移除"""
     query = update.callback_query
     
     try:
-        # 获取管理员信息
-        admin_info = await db_fetch_one(
-            "SELECT username, first_name FROM users WHERE id = $1 AND is_admin = TRUE",
-            admin_id
-        )
+        admin_info = await db_fetch_one("SELECT username, first_name FROM users WHERE id = $1 AND is_admin = TRUE", admin_id)
         
         if not admin_info:
-            await query.edit_message_text(
-                "❌ 用户不存在或不是管理员。",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")
-                ]]),
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text("❌ 用户不存在或不是管理员。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")]]), parse_mode='Markdown')
             return
         
-        # 移除管理员权限
         await db_execute("UPDATE users SET is_admin = FALSE WHERE id = $1", admin_id)
         
         name = admin_info['first_name'] or admin_info['username'] or f"用户{admin_id}"
@@ -416,49 +366,30 @@ async def execute_admin_removal(update: Update, context: ContextTypes.DEFAULT_TY
         keyboard = [[InlineKeyboardButton("🔙 返回权限管理", callback_data="admin_panel_permissions")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        
+        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode='Markdown')
         logger.info(f"管理员 {update.effective_user.id} 移除了用户 {admin_id} 的管理员权限")
         
     except Exception as e:
         logger.error(f"移除管理员失败: {e}", exc_info=True)
-        await query.edit_message_text(
-            "❌ 移除管理员失败，请重试。",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")
-            ]]),
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("❌ 移除管理员失败，请重试。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel_permissions")]]), parse_mode='Markdown')
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消当前操作"""
-    if 'next_action' in context.user_data:
-        del context.user_data['next_action']
-    if 'comment_input' in context.user_data:
-        del context.user_data['comment_input']
-    if 'current_vote' in context.user_data:
-        del context.user_data['current_vote']
+    for key in ['next_action', 'comment_input', 'current_vote']:
+        context.user_data.pop(key, None)
     await update.message.reply_text("✅ 操作已取消")
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示所有命令（仅管理员）"""
-    user_id = update.effective_user.id
-    if await is_admin(user_id):
+    if await is_admin(update.effective_user.id):
         await show_all_commands(update, context, from_command=True)
     else:
         await update.message.reply_text("❌ 此命令仅管理员可用")
 
 async def private_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊文本消息"""
-    # 首先检查是否是评论输入
     if await handle_comment_input(update, context):
         return
-    
-    # 然后检查是否是管理员输入
     await process_admin_input(update, context)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -481,35 +412,22 @@ ptb_app.add_handler(CommandHandler("commands", commands_command))
 # 添加回调查询处理器
 ptb_app.add_handler(CallbackQueryHandler(all_button_handler))
 
-# 添加私聊文本处理器（包括管理员输入和评论输入）
-ptb_app.add_handler(MessageHandler(
-    filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-    private_text_handler
-))
+# 添加私聊文本处理器
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, private_text_handler))
 
 # 添加群聊中的@用户处理
-ptb_app.add_handler(MessageHandler(
-    filters.Regex(r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))') & ~filters.COMMAND & filters.ChatType.GROUPS,
-    handle_nomination
-))
+ptb_app.add_handler(MessageHandler(filters.Regex(r'(?:@(\w{5,}))|(?:查询\s*@(\w{5,}))') & ~filters.COMMAND & filters.ChatType.GROUPS, handle_nomination))
 
 # 添加私聊中的查询处理
-ptb_app.add_handler(MessageHandler(
-    filters.Regex(r'^查询\s+@(\w{5,})$') & ~filters.COMMAND & filters.ChatType.PRIVATE,
-    handle_username_query
-))
+ptb_app.add_handler(MessageHandler(filters.Regex(r'^查询\s+@(\w{5,})$') & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_username_query))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI生命周期管理"""
     logger.info("🚀 启动神谕者机器人...")
-    
     try:
-        # 初始化数据库
         await init_pool()
         await create_tables()
-        
-        # 设置webhook
         await ptb_app.bot.delete_webhook(drop_pending_updates=True)
         if WEBHOOK_URL:
             await ptb_app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
@@ -517,7 +435,6 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("⚠️ 未设置RENDER_EXTERNAL_URL，webhook可能无法工作")
         
-        # 启动应用
         async with ptb_app:
             await ptb_app.start()
             logger.info("✅ 神谕者已就绪并开始监听")
@@ -528,89 +445,49 @@ async def lifespan(app: FastAPI):
         raise
     finally:
         logger.info("🔌 关闭神谕者机器人...")
-        try:
+        if ptb_app.running:
             await ptb_app.stop()
-        except Exception as e:
-            logger.error(f"关闭应用时出错: {e}")
 
 def main():
     """主函数"""
-    # 检查必要的环境变量
     if not TOKEN:
         logger.critical("❌ TELEGRAM_BOT_TOKEN 环境变量未设置")
         return
-    
     if not RENDER_URL:
         logger.warning("⚠️ RENDER_EXTERNAL_URL 未设置，这可能影响webhook功能")
     
-    # 创建FastAPI应用
-    fastapi_app = FastAPI(
-        title="神谕者机器人",
-        description="Telegram声誉管理机器人",
-        version="2.0.0",
-        lifespan=lifespan
-    )
+    fastapi_app = FastAPI(title="神谕者机器人", description="Telegram声誉管理机器人", version="2.0.0", lifespan=lifespan)
     
     @fastapi_app.get("/", include_in_schema=False)
     async def health_check():
-        """健康检查端点"""
-        return {
-            "status": "ok", 
-            "message": "神谕者正在运行",
-            "bot_username": ptb_app.bot.username if ptb_app.bot else None
-        }
+        return {"status": "ok", "message": "神谕者正在运行", "bot_username": ptb_app.bot.username if ptb_app.bot else None}
     
     @fastapi_app.get("/health", include_in_schema=False)
     async def detailed_health():
-        """详细健康检查"""
         try:
             bot_info = await ptb_app.bot.get_me() if ptb_app.bot else None
-            return {
-                "status": "healthy",
-                "bot_info": {
-                    "id": bot_info.id if bot_info else None,
-                    "username": bot_info.username if bot_info else None,
-                    "first_name": bot_info.first_name if bot_info else None
-                },
-                "webhook_url": WEBHOOK_URL
-            }
+            return {"status": "healthy", "bot_info": {"id": bot_info.id, "username": bot_info.username, "first_name": bot_info.first_name} if bot_info else None, "webhook_url": WEBHOOK_URL}
         except Exception as e:
-            return {
-                "status": "unhealthy",
-                "error": str(e)
-            }
+            return {"status": "unhealthy", "error": str(e)}
     
     @fastapi_app.post(f"/{TOKEN}", include_in_schema=False)
     async def process_telegram_update(request: Request):
-        """处理Telegram webhook更新"""
         try:
-            # 解析JSON数据
             json_data = await request.json()
-            
-            # 创建Update对象
             update = Update.de_json(json_data, ptb_app.bot)
-            
             if update:
-                # 处理更新
                 await ptb_app.process_update(update)
                 return Response(status_code=200)
             else:
                 logger.warning("收到无效的更新数据")
                 return Response(status_code=400)
-                
         except Exception as e:
             logger.error(f"处理Webhook时出错: {e}", exc_info=True)
             return Response(status_code=500)
     
-    # 启动服务器
     logger.info(f"🌐 启动FastAPI服务器，端口: {PORT}")
     try:
-        uvicorn.run(
-            fastapi_app, 
-            host="0.0.0.0", 
-            port=PORT,
-            log_level="info"
-        )
+        uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT, log_level="info")
     except Exception as e:
         logger.critical(f"启动服务器失败: {e}", exc_info=True)
 
