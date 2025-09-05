@@ -41,20 +41,18 @@ async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ) as leaderboard_qualifiers
         """, min_votes) or 0
         
-        # FINAL FIX: Changed r.tag_ids to r.tag_id to match the database schema
+        # **最终修复**: 增加类型检查，确保只对数组类型的列使用 UNNEST
         tag_usage = await db_fetch_all("""
             SELECT t.name, t.type, COUNT(r.id) as usage_count
             FROM reputations r, UNNEST(r.tag_id) as current_tag_id
             JOIN tags t ON t.id = current_tag_id
+            WHERE pg_typeof(r.tag_id) = 'integer[]' AND r.tag_id IS NOT NULL
             GROUP BY t.id, t.name, t.type
             ORDER BY usage_count DESC
             LIMIT 5
         """)
         
-        if total_reputations > 0:
-            positive_ratio = round((positive_votes / total_reputations) * 100)
-        else:
-            positive_ratio = 0
+        positive_ratio = round((positive_votes / total_reputations) * 100) if total_reputations > 0 else 0
         
         message = "📊 **神谕数据中心**\n\n"
         message += "**📈 基础统计**\n"
@@ -103,16 +101,8 @@ async def show_system_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_user_personal_stats(user_id: int) -> Optional[Dict]:
     """获取用户个人统计"""
     try:
-        given_stats = await db_fetch_one("""
-            SELECT COUNT(*) as total_given, COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_given, COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_given
-            FROM reputations WHERE voter_id = $1
-        """, user_id)
-        
-        received_stats = await db_fetch_one("""
-            SELECT COUNT(*) as total_received, COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_received, COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_received, COUNT(DISTINCT voter_id) as unique_voters
-            FROM reputations WHERE target_id = $1
-        """, user_id)
-        
+        given_stats = await db_fetch_one("SELECT COUNT(*) as total_given, COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_given, COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_given FROM reputations WHERE voter_id = $1", user_id)
+        received_stats = await db_fetch_one("SELECT COUNT(*) as total_received, COUNT(*) FILTER (WHERE is_positive = TRUE) as positive_received, COUNT(*) FILTER (WHERE is_positive = FALSE) as negative_received, COUNT(DISTINCT voter_id) as unique_voters FROM reputations WHERE target_id = $1", user_id)
         favorites_given = await db_fetchval("SELECT COUNT(*) FROM favorites WHERE user_id = $1", user_id)
         favorites_received = await db_fetchval("SELECT COUNT(*) FROM favorites WHERE target_id = $1", user_id)
         
@@ -136,34 +126,27 @@ async def show_personal_stats(update: Update, context: ContextTypes.DEFAULT_TYPE
     message = f"📊 **{update.effective_user.first_name or '您'}的个人统计**\n\n"
     
     given = stats.get('given', {})
-    message += "**📤 您给出的评价**\n"
-    message += f"• 总评价: {given.get('total_given', 0)} 条\n"
+    message += f"**📤 您给出的评价**\n• 总评价: {given.get('total_given', 0)} 条\n"
     if given.get('total_given', 0) > 0:
-        message += f"• 好评: {given.get('positive_given', 0)} 条\n"
-        message += f"• 差评: {given.get('negative_given', 0)} 条\n"
+        message += f"• 好评: {given.get('positive_given', 0)} 条\n• 差评: {given.get('negative_given', 0)} 条\n"
     message += "\n"
     
     received = stats.get('received', {})
-    message += "**📥 您收到的评价**\n"
-    message += f"• 总评价: {received.get('total_received', 0)} 条\n"
+    message += f"**📥 您收到的评价**\n• 总评价: {received.get('total_received', 0)} 条\n"
     if received.get('total_received', 0) > 0:
         positive_received = received.get('positive_received', 0)
         total_received = received.get('total_received', 1)
         message += f"• 好评: {positive_received} 条\n"
-        message += f"• 差评: {received.get('negative_received', 0)} 条\n"
+        message += f"• 差评: {received.get('negative_given', 0)} 条\n"
         message += f"• 评价人数: {received.get('unique_voters', 0)} 人\n"
         reputation_score = round((positive_received / total_received) * 100) if total_received > 0 else 0
         message += f"• 声誉分数: {reputation_score}%\n"
     message += "\n"
     
-    message += "**💖 收藏统计**\n"
-    message += f"• 您收藏的用户: {stats.get('favorites_given', 0)} 个\n"
-    message += f"• 收藏您的用户: {stats.get('favorites_received', 0)} 个\n"
+    message += f"**💖 收藏统计**\n• 您收藏的用户: {stats.get('favorites_given', 0)} 个\n• 收藏您的用户: {stats.get('favorites_received', 0)} 个\n"
     
     keyboard = [[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+    target_message = update.callback_query.message if update.callback_query else update.message
+    await target_message.reply_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
