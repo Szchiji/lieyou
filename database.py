@@ -10,20 +10,15 @@ pool = None
 async def init_db():
     """初始化数据库连接池和表结构。"""
     global pool
-    if pool:
-        return
-    
+    if pool: return
     db_url = environ.get("DATABASE_URL")
     if not db_url:
         logger.critical("DATABASE_URL 环境变量未设置！")
         raise ValueError("DATABASE_URL is not set")
-        
     try:
         pool = await asyncpg.create_pool(dsn=db_url, min_size=1, max_size=10)
         logger.info("数据库连接池已成功创建。")
-        
         async with pool.acquire() as connection:
-            # --- 正确的表结构：username 是核心，id 是可选的 ---
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     pkid SERIAL PRIMARY KEY,
@@ -33,72 +28,36 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
-            # ... (其他表的创建语句保持不变)
             await connection.execute("""
-                CREATE TABLE IF NOT EXISTS tags (
-                    pkid SERIAL PRIMARY KEY,
-                    name VARCHAR(255) UNIQUE,
-                    type VARCHAR(50) NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+                CREATE TABLE IF NOT EXISTS tags ( pkid SERIAL PRIMARY KEY, name VARCHAR(255) UNIQUE, type VARCHAR(50) NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW() );
             """)
             await connection.execute("""
-                CREATE TABLE IF NOT EXISTS evaluations (
-                    pkid SERIAL PRIMARY KEY,
-                    user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                    target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                    tag_pkid INTEGER NOT NULL REFERENCES tags(pkid) ON DELETE CASCADE,
-                    type VARCHAR(50) NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(user_pkid, target_user_pkid, tag_pkid)
-                );
+                CREATE TABLE IF NOT EXISTS evaluations ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE, target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE, tag_pkid INTEGER NOT NULL REFERENCES tags(pkid) ON DELETE CASCADE, type VARCHAR(50) NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_pkid, target_user_pkid, tag_pkid) );
             """)
             await connection.execute("""
-                CREATE TABLE IF NOT EXISTS favorites (
-                    pkid SERIAL PRIMARY KEY,
-                    user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                    target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(user_pkid, target_user_pkid)
-                );
+                CREATE TABLE IF NOT EXISTS favorites ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE, target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_pkid, target_user_pkid) );
             """)
             await connection.execute("""
-                CREATE TABLE IF NOT EXISTS admins (
-                    pkid SERIAL PRIMARY KEY,
-                    user_pkid INTEGER NOT NULL UNIQUE REFERENCES users(pkid) ON DELETE CASCADE,
-                    added_by_pkid INTEGER REFERENCES users(pkid),
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                );
+                CREATE TABLE IF NOT EXISTS admins ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER NOT NULL UNIQUE REFERENCES users(pkid) ON DELETE CASCADE, added_by_pkid INTEGER REFERENCES users(pkid), created_at TIMESTAMPTZ DEFAULT NOW() );
             """)
             await connection.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key VARCHAR(255) PRIMARY KEY,
-                    value TEXT,
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                );
+                CREATE TABLE IF NOT EXISTS settings ( key VARCHAR(255) PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT NOW() );
             """)
-            
             god_user_id = environ.get("GOD_USER_ID")
             if god_user_id:
                 try:
                     user_id = int(god_user_id)
                     await connection.execute("""
                         INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3)
-                        ON CONFLICT (id) DO UPDATE SET username = $2, first_name = $3
+                        ON CONFLICT (id) DO UPDATE SET username = COALESCE(users.username, $2), first_name = COALESCE(users.first_name, $3)
                     """, user_id, f"god_user_{user_id}", "God User")
-                    
                     god_user_record = await connection.fetchrow("SELECT pkid FROM users WHERE id = $1", user_id)
                     if god_user_record:
-                        await connection.execute("""
-                            INSERT INTO admins (user_pkid) VALUES ($1)
-                            ON CONFLICT (user_pkid) DO NOTHING;
-                        """, god_user_record['pkid'])
+                        await connection.execute("INSERT INTO admins (user_pkid) VALUES ($1) ON CONFLICT (user_pkid) DO NOTHING;", god_user_record['pkid'])
                         logger.info(f"已确保 GOD_USER_ID ({god_user_id}) 是管理员。")
-                except (ValueError, asyncpg.UniqueViolationError):
-                     logger.error("GOD_USER_ID 设置或插入数据库时出错。")
-
+                except (ValueError, asyncpg.UniqueViolationError) as e:
+                     logger.error(f"GOD_USER_ID 设置或插入数据库时出错: {e}")
             logger.info("所有数据表已检查/创建。")
-
     except Exception as e:
         logger.critical(f"数据库初始化失败: {e}", exc_info=True)
         raise
@@ -109,43 +68,41 @@ async def get_pool():
 
 async def db_execute(query, *args):
     db_pool = await get_pool()
-    async with db_pool.acquire() as connection: return await connection.execute(query, *args)
+    async with db_pool.acquire() as c: return await c.execute(query, *args)
 
 async def db_fetch_one(query, *args):
     db_pool = await get_pool()
-    async with db_pool.acquire() as connection: return await connection.fetchrow(query, *args)
+    async with db_pool.acquire() as c: return await c.fetchrow(query, *args)
 
 async def db_fetch_all(query, *args):
     db_pool = await get_pool()
-    async with db_pool.acquire() as connection: return await connection.fetch(query, *args)
+    async with db_pool.acquire() as c: return await c.fetch(query, *args)
+
+# --- 这就是被遗忘的函数 ---
+async def db_fetch_val(query, *args):
+    """获取查询结果的单个值。"""
+    db_pool = await get_pool()
+    async with db_pool.acquire() as c: return await c.fetchval(query, *args)
 
 async def get_or_create_user(tg_user: TelegramUser) -> dict:
-    """处理【发起操作】的真实Telegram用户。"""
     if not tg_user or not tg_user.id: raise ValueError("需要一个有效的Telegram用户对象。")
     if not tg_user.username: raise ValueError("操作发起者必须设置一个Telegram用户名。")
-
-    user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", tg_user.username.lower())
-    if user_record:
-        if user_record['id'] != tg_user.id or user_record['first_name'] != tg_user.first_name:
-            user_record = await db_fetch_one("UPDATE users SET id = $1, first_name = $2 WHERE username = $3 RETURNING *", tg_user.id, tg_user.first_name, tg_user.username.lower())
-        return dict(user_record)
-    
+    username_lower = tg_user.username.lower()
     user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", tg_user.id)
     if user_record:
-        user_record = await db_fetch_one("UPDATE users SET username = $1, first_name = $2 WHERE id = $3 RETURNING *", tg_user.username.lower(), tg_user.first_name, tg_user.id)
+        if user_record['username'] != username_lower or user_record['first_name'] != tg_user.first_name:
+            user_record = await db_fetch_one("UPDATE users SET username = $1, first_name = $2 WHERE id = $3 RETURNING *", username_lower, tg_user.first_name, tg_user.id)
         return dict(user_record)
-
-    new_user = await db_fetch_one("INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (username) DO UPDATE SET id = $1, first_name = $3 RETURNING *", tg_user.id, tg_user.username.lower(), tg_user.first_name)
-    logger.info(f"创建新用户: {tg_user.id} (@{tg_user.username})")
-    return dict(new_user)
+    else:
+        new_user = await db_fetch_one("INSERT INTO users (id, username, first_name) VALUES ($1, $2, $3) ON CONFLICT (username) DO UPDATE SET id = $1, first_name = $3 RETURNING *", tg_user.id, username_lower, tg_user.first_name)
+        logger.info(f"创建新用户: {tg_user.id} (@{tg_user.username})")
+        return dict(new_user)
 
 async def get_or_create_target(username: str) -> dict:
-    """处理【被评价】的目标字符串。"""
     if not username: raise ValueError("用户名不能为空")
     username = username.lower()
     user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username)
     if user_record: return dict(user_record)
-    
     new_user = await db_fetch_one("INSERT INTO users (username) VALUES ($1) RETURNING *", username)
     logger.info(f"为目标字符串 @{username} 创建了新的数据库条目。")
     return dict(new_user)
