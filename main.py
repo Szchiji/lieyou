@@ -46,7 +46,6 @@ try:
     from handlers.favorites import add_favorite, remove_favorite, my_favorites_list
     from handlers.stats import user_stats_menu
     from handlers.erasure import request_data_erasure, confirm_data_erasure, cancel_data_erasure
-    # 核心修正：从下面的列表中移除了不存在的 'set_setting_prompt'
     from handlers.admin import (
         god_mode_command, settings_menu, process_admin_input, tags_panel, permissions_panel, 
         system_settings_panel, leaderboard_panel, add_tag_prompt, remove_tag_menu, remove_tag_confirm, 
@@ -69,7 +68,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"无法向用户发送错误通知: {e}")
 
-# --- 命令和回调处理器 (保持不变) ---
+# --- 命令和回调处理器 ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message or update.callback_query.message
@@ -83,7 +82,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # 修正 admin.py 中 process_admin_input 后带来的问题
     is_callback = hasattr(update, 'callback_query') and update.callback_query
     if is_callback:
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -166,7 +164,6 @@ async def lifespan(app: FastAPI):
         logger.info("数据库初始化成功。")
     except Exception as e:
         logger.critical(f"数据库初始化失败: {e}", exc_info=True)
-        # 在实际生产中，这里应该优雅地退出或重试
         raise
 
     if RENDER_EXTERNAL_URL:
@@ -175,13 +172,12 @@ async def lifespan(app: FastAPI):
         logger.info("Webhook 设置成功。")
 
     await ptb_app.initialize()
-    if hasattr(ptb_app, 'post_init'): await ptb_app.post_init(ptb_app)
-    logger.info("PTB Application 初始化完成。")
+    # 核心修正：移除了画蛇添足的 post_init 和 post_shutdown 调用
+    logger.info("PTB Application 初始化完成。机器人已准备就绪！")
     
     yield
     
     logger.info("FastAPI lifespan: 关闭中...")
-    if hasattr(ptb_app, 'post_shutdown'): await ptb_app.post_shutdown(ptb_app)
     await ptb_app.shutdown()
     db_pool = await get_pool()
     if db_pool: await db_pool.close(); logger.info("数据库连接池已关闭。")
