@@ -6,7 +6,8 @@ import uvicorn
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
-from telegram import Update
+# --- 核心修正：导入缺失的模块 ---
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters, JobQueue
@@ -40,7 +41,7 @@ else:
 # --- 导入所有 Handlers ---
 try:
     from database import init_db, get_setting, is_admin
-    from handlers.reputation import handle_query, send_reputation_card, vote_menu, process_vote, back_to_rep_card
+    from handlers.reputation import handle_query, vote_menu, process_vote, back_to_rep_card
     from handlers.favorites import add_favorite, remove_favorite, my_favorites
     from handlers.stats import user_stats_menu
     from handlers.erasure import request_data_erasure, confirm_data_erasure, cancel_data_erasure
@@ -51,7 +52,6 @@ try:
         system_settings_panel, set_start_message_prompt, show_all_commands,
         leaderboard_panel
     )
-    # 导入排行榜相关
     from handlers.leaderboard import show_leaderboard_menu, get_leaderboard_page, clear_leaderboard_cache
 
     logger.info("所有 handlers 和 database 模块已成功导入。")
@@ -90,8 +90,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     data = query.data
 
-    # 定义回调路由
-    # --- 核心修正：使用正确的函数名和回调格式 ---
     routes = {
         r"^my_favorites_(\d+)$": (lambda p: my_favorites(update, context, int(p[0]))),
         r"^add_favorite_(\d+)_(.*)$": (lambda p: add_favorite(update, context, int(p[0]), p[1])),
@@ -160,7 +158,6 @@ async def lifespan(app: FastAPI):
     global ptb_app
     logger.info("FastAPI lifespan: 启动中...")
     
-    logger.info("构建 Telegram Application...")
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
     
@@ -200,7 +197,6 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook")
 async def process_telegram_update(request: Request):
-    """处理来自 Telegram 的 Webhook 请求"""
     if ptb_app:
         body = await request.json()
         update = Update.de_json(body, ptb_app.bot)
@@ -221,7 +217,6 @@ if __name__ == "__main__":
         ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         ptb_app.add_error_handler(error_handler)
         
-        # 添加处理器
         ptb_app.add_handler(CommandHandler("start", start_command))
         ptb_app.add_handler(CommandHandler("help", start_command))
         ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
@@ -230,7 +225,8 @@ if __name__ == "__main__":
         ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.UpdateType.MESSAGE | filters.UpdateType.EDITED_MESSAGE), handle_query))
         ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
 
-        init_db_sync = uvicorn.run(init_db) # 本地运行时同步初始化
+        import asyncio
+        asyncio.run(init_db())
         
         logger.info("开始轮询...")
         ptb_app.run_polling()
