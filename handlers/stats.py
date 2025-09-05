@@ -2,11 +2,13 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-from database import db_fetch_all, db_fetch_one, db_fetch_val
+# 修正：将 db_fetch_val 改为正确的 db_fetchval
+from database import db_fetch_all, db_fetch_one, db_fetchval
 
 logger = logging.getLogger(__name__)
 
 async def user_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, page: int = 1):
+    """显示用户的统计数据，使用 pkid"""
     query = update.callback_query
     per_page = 10
     offset = (page - 1) * per_page
@@ -17,7 +19,7 @@ async def user_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
             await query.answer("❌ 找不到该用户。", show_alert=True)
             return
             
-        display_name = user_info['first_name'] or f"@{user_info['username']}"
+        display_name = user_info['first_name'] or (f"@{user_info['username']}" if user_info['username'] else f"用户 {user_info['pkid']}")
 
         votes = await db_fetch_all(
             """
@@ -32,10 +34,11 @@ async def user_stats_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
             target_user_pkid, per_page, offset
         )
 
-        total_votes = await db_fetch_val(
+        # 修正：将 db_fetch_val 改为正确的 db_fetchval
+        total_votes = await db_fetchval(
             "SELECT COUNT(*) FROM votes WHERE target_user_pkid = $1", target_user_pkid
         ) or 0
-        total_pages = (total_votes + per_page - 1) // per_page
+        total_pages = max(1, (total_votes + per_page - 1) // per_page)
         
         text = f"📊 **'{display_name}' 的统计数据 (第 {page}/{total_pages} 页)**\n\n"
         if not votes:
