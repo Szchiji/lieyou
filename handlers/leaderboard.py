@@ -13,32 +13,35 @@ CACHE_KEY = "leaderboard_cache"
 CACHE_DURATION = 300 # 缓存5分钟
 
 # =============================================================================
-# 命令处理器
+# 为群组设计的、独立的命令处理器
 # =============================================================================
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """在群组或私聊中，通过命令或文本发送排行榜选项。"""
+    """在群组或私聊中，通过命令或文本发送一个简洁的排行榜选项菜单。"""
     text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
     keyboard = [
+        # --- 核心修正：修改按钮文本 ---
         [InlineKeyboardButton("👍 推荐榜", callback_data="leaderboard_recommend_1"),
-         InlineKeyboardButton("👎 警告榜", callback_data="leaderboard_block_1")],
+         InlineKeyboardButton("👎 避雷榜", callback_data="leaderboard_block_1")],
         [InlineKeyboardButton("✨ 声望榜", callback_data="leaderboard_score_1"),
          InlineKeyboardButton("❤️ 人气榜", callback_data="leaderboard_favorites_1")]
     ]
-    # 使用 reply_text 发送新消息，而不是 edit_message_text 编辑旧消息
+    # 在群里，我们总是发送一个新消息
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # =============================================================================
-# 按钮回调处理器
+# 为私聊主菜单设计的、更完整的按钮回调处理器
 # =============================================================================
 async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理从其他菜单跳转过来的排行榜请求（通过按钮点击）。"""
+    """处理从主菜单跳转过来的排行榜请求（通过按钮点击）。"""
     query = update.callback_query
     text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
     keyboard = [
+        # --- 核心修正：修改按钮文本 ---
         [InlineKeyboardButton("👍 推荐榜", callback_data="leaderboard_recommend_1"),
-         InlineKeyboardButton("👎 警告榜", callback_data="leaderboard_block_1")],
+         InlineKeyboardButton("👎 避雷榜", callback_data="leaderboard_block_1")],
         [InlineKeyboardButton("✨ 声望榜", callback_data="leaderboard_score_1"),
          InlineKeyboardButton("❤️ 人气榜", callback_data="leaderboard_favorites_1")],
+        # 这个返回按钮，只会出现在私聊的主菜单流程中
         [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -74,7 +77,8 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
 
     sort_key, title_icon, title_text = {
         'recommend': ('recommend_count', "👍", "推荐榜"),
-        'block': ('block_count', "👎", "警告榜"),
+        # --- 核心修正：修改榜单标题 ---
+        'block': ('block_count', "👎", "避雷榜"),
         'score': ('score', "✨", "声望榜"),
         'favorites': ('favorite_count', "❤️", "人气榜")
     }.get(board_type, ('score', "✨", "声望榜"))
@@ -106,7 +110,8 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
     if page < total_pages: pagination.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"leaderboard_{board_type}_{page+1}"))
     if pagination: keyboard.append(pagination)
     
-    keyboard.append([InlineKeyboardButton("🔙 返回榜单选择", callback_data="leaderboard_menu")])
+    # 从排行榜详情页，可以返回到排行榜的简洁菜单
+    keyboard.append([InlineKeyboardButton("🔙 返回榜单选择", callback_data="leaderboard_menu_simple")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def clear_leaderboard_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
