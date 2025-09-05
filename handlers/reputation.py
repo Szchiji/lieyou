@@ -3,7 +3,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-# 核心修正：添加了 db_fetch_val 的导入
 from database import (
     db_fetch_one, db_execute, db_fetch_all, get_or_create_user, db_fetch_val
 )
@@ -64,7 +63,10 @@ async def send_reputation_card(message_or_query, context: ContextTypes.DEFAULT_T
         reply_markup = InlineKeyboardMarkup(card_data['keyboard'])
 
         if query:
-            await query.edit_message_text(card_data['text'], reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            if message.text != card_data['text'] or message.reply_markup != reply_markup:
+                await query.edit_message_text(card_data['text'], reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            else:
+                await query.answer("数据已是最新。") # 如果内容无变化，仅作提示
         else:
             sent_message = await message.reply_text(card_data['text'], reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
             if origin != "fav_refresh":
@@ -79,7 +81,21 @@ async def send_reputation_card(message_or_query, context: ContextTypes.DEFAULT_T
             await message.reply_text(err_msg)
 
 async def build_reputation_card_data(target_user_pkid: int, origin: str = "") -> dict:
-    user_info = await db_fetch_one("SELECT * FROM users WHERE pkid = $1", target_user_pkid)
+    # --- 性能优化：将4次查询合并为1次 ---
+    sql = """
+    SELECT
+        u.pkid,
+        u.first_name,
+        u.username,
+        (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = u.pkid AND type = 'recommend') AS recommend_count,
+        (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = u.pkid AND type = 'block') AS block_count,
+        (SELECT COUNT(*) FROM favorites WHERE target_user_pkid = u.pkid) AS favorite_count
+    FROM
+        users u
+    WHERE
+        u.pkid = $1;
+    """
+    user_info = await db_fetch_one(sql, target_user_pkid)
     if not user_info: return None
 
     first_name = user_info.get('first_name')
@@ -91,15 +107,15 @@ async def build_reputation_card_data(target_user_pkid: int, origin: str = "") ->
     else:
         display_name = f"用户 {user_info['pkid']}"
 
-    recommend_count = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend'", target_user_pkid)
-    block_count = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'block'", target_user_pkid)
-    favorite_count = await db_fetch_val("SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1", target_user_pkid)
-    score = (recommend_count or 0) - (block_count or 0)
+    recommend_count = user_info.get('recommend_count', 0)
+    block_count = user_info.get('block_count', 0)
+    favorite_count = user_info.get('favorite_count', 0)
+    score = recommend_count - block_count
 
     text = (f"**声誉卡片: {display_name}**\n\n"
-            f"👍 **推荐**: `{recommend_count or 0}`\n"
-            f"👎 **警告**: `{block_count or 0}`\n"
-            f"❤️ **收藏**: `{favorite_count or 0}`\n"
+            f"👍 **推荐**: `{recommend_count}`\n"
+            f"👎 **警告**: `{block_count}`\n"
+            f"❤️ **收藏**: `{favorite_count}`\n"
             f"--------------------\n"
             f"✨ **综合声望**: `{score}`")
     
