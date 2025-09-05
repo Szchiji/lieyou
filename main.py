@@ -53,6 +53,7 @@ try:
         remove_admin_confirm, execute_admin_removal, set_start_message_prompt, 
         show_all_commands, selective_remove_menu, confirm_user_removal, execute_user_removal
     )
+    from handlers.utils import schedule_message_deletion
     logger.info("所有 handlers 和 database 模块已成功导入。")
 except ImportError as e:
     logger.critical(f"模块导入失败: {e}", exc_info=True)
@@ -79,15 +80,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1"), InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
     ]
     
-    # --- 核心修正 #2 & #3: 修正管理员判断逻辑，并添加数据删除按钮 ---
     if message.chat.type == 'private':
         private_buttons = [
             InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1"),
-            InlineKeyboardButton("🗑️ 删除我的数据", callback_data="erase_my_data_prompt") # 新增按钮
+            InlineKeyboardButton("🗑️ 删除我的数据", callback_data="erase_my_data_prompt")
         ]
         keyboard.append(private_buttons)
         
-        # 修正：无论如何都检查管理员身份
         if await is_admin(user.id):
             keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
 
@@ -113,7 +112,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     simple_handlers = {
         "back_to_help": start_command, 
         "my_favorites_refresh": lambda u, c: my_favorites_list(u, c, 1),
-        "erase_my_data_prompt": request_data_erasure, # 新增处理器
+        "erase_my_data_prompt": request_data_erasure,
         "admin_settings_menu": settings_menu, 
         "admin_panel_tags": tags_panel,
         "admin_panel_permissions": permissions_panel, 
@@ -171,17 +170,14 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI lifespan: 启动中...")
     
     logger.info("构建 Telegram Application...")
-    # 使用 no_schedules=False 确保 JobQueue 被正确初始化和使用
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
     
-    # 添加处理器...
+    # 添加处理器
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
-    # 移除 /erase_my_data 命令处理器，因为它现在由按钮触发
-    # ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
-    ptb_app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
+    ptb_app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
     ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
@@ -195,17 +191,19 @@ async def lifespan(app: FastAPI):
         logger.critical(f"数据库初始化失败: {e}", exc_info=True)
         raise
 
+    # --- 核心修正：严格遵守 PTB 的初始化流程 ---
+    await ptb_app.initialize() # 1. 初始化应用
+    
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         logger.info(f"正在设置 webhook 到: {webhook_url}")
-        # 核心修正 #1: 确保 PTB Application 知道要处理 JobQueue
-        if ptb_app.job_queue:
-            logger.info("JobQueue 已找到，将与 Webhook 一同运行。")
-            await ptb_app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
-            await ptb_app.start() # 启动后台任务，包括 JobQueue
-        else:
-            logger.error("JobQueue 未初始化！定时删除功能将无法工作。")
-            await ptb_app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
+        await ptb_app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES) # 2. 设置 Webhook
+        
+    if ptb_app.job_queue:
+        logger.info("JobQueue 已找到，将与 Webhook 一同运行。")
+        await ptb_app.start() # 3. 启动后台任务（包括 JobQueue）
+    else:
+        logger.error("JobQueue 未初始化！定时删除功能将无法工作。")
     
     logger.info("PTB Application 初始化完成。机器人已准备就绪！")
     
