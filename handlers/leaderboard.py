@@ -2,9 +2,9 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from math import ceil
-import json
+import time
 
-from database import db_fetch_all, db_fetch_one
+from database import db_fetch_all
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,26 @@ PAGE_SIZE = 10
 CACHE_KEY = "leaderboard_cache"
 CACHE_DURATION = 300 # 缓存5分钟
 
+# =============================================================================
+# 命令处理器
+# =============================================================================
+async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """在群组或私聊中，通过命令或文本发送排行榜选项。"""
+    text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
+    keyboard = [
+        [InlineKeyboardButton("👍 推荐榜", callback_data="leaderboard_recommend_1"),
+         InlineKeyboardButton("👎 警告榜", callback_data="leaderboard_block_1")],
+        [InlineKeyboardButton("✨ 声望榜", callback_data="leaderboard_score_1"),
+         InlineKeyboardButton("❤️ 人气榜", callback_data="leaderboard_favorites_1")]
+    ]
+    # 使用 reply_text 发送新消息，而不是 edit_message_text 编辑旧消息
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# =============================================================================
+# 按钮回调处理器
+# =============================================================================
 async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理从其他菜单跳转过来的排行榜请求（通过按钮点击）。"""
     query = update.callback_query
     text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
     keyboard = [
@@ -27,13 +46,12 @@ async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TY
 async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int):
     query = update.callback_query
     
-    # 尝试从缓存获取数据
     cached_data = context.bot_data.get(CACHE_KEY)
-    current_time = context.application.create_task(update.effective_message.date).done().result().timestamp()
+    current_time = time.time()
 
-    if cached_data and (current_time - cached_data['timestamp'] < CACHE_DURATION):
+    if cached_data and (current_time - cached_data.get('timestamp', 0) < CACHE_DURATION):
         logger.info(f"从缓存加载排行榜数据 ({board_type})")
-        all_users = cached_data['data']
+        all_users = cached_data.get('data', [])
     else:
         logger.info("重新生成排行榜数据并缓存")
         sql = """
@@ -49,6 +67,7 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
         LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM evaluations WHERE type = 'recommend' GROUP BY target_user_pkid) rec ON u.pkid = rec.target_user_pkid
         LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM evaluations WHERE type = 'block' GROUP BY target_user_pkid) blk ON u.pkid = blk.target_user_pkid
         LEFT JOIN (SELECT target_user_pkid, COUNT(*) as count FROM favorites GROUP BY target_user_pkid) fav ON u.pkid = fav.target_user_pkid
+        WHERE u.id IS NOT NULL;
         """
         all_users = await db_fetch_all(sql)
         context.bot_data[CACHE_KEY] = {'timestamp': current_time, 'data': all_users}
@@ -60,7 +79,7 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
         'favorites': ('favorite_count', "❤️", "人气榜")
     }.get(board_type, ('score', "✨", "声望榜"))
 
-    sorted_users = sorted(all_users, key=lambda x: x[sort_key], reverse=True)
+    sorted_users = sorted(all_users, key=lambda x: x.get(sort_key, 0), reverse=True)
     
     total_count = len(sorted_users)
     total_pages = ceil(total_count / PAGE_SIZE) if total_count > 0 else 1
@@ -77,8 +96,8 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
         rank_start = offset + 1
         for i, user in enumerate(users_on_page):
             rank = rank_start + i
-            display_name = f"@{user['username']}" if user['username'] else (user['first_name'] or f"用户{user['pkid']}")
-            score = user[sort_key]
+            display_name = f"@{user['username']}" if user['username'] else (user.get('first_name') or f"用户{user['pkid']}")
+            score = user.get(sort_key, 0)
             text += f"`{rank:2d}.` {display_name} - **{score}**\n"
             
     keyboard = []
@@ -99,6 +118,5 @@ async def clear_leaderboard_cache(update: Update, context: ContextTypes.DEFAULT_
     else:
         await query.answer("ℹ️ 当前没有排行榜缓存。", show_alert=True)
     
-    # 返回管理员面板
     from .admin import leaderboard_panel
     await leaderboard_panel(update, context)
