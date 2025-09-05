@@ -15,10 +15,7 @@ from telegram.constants import ParseMode
 
 load_dotenv()
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -29,12 +26,11 @@ from handlers.favorites import add_favorite, remove_favorite, my_favorites_list
 from handlers.stats import user_stats_menu
 from handlers.erasure import request_data_erasure, confirm_data_erasure, cancel_data_erasure
 from handlers.admin import (
-    god_mode_command, settings_menu, process_admin_input,
-    tags_panel, permissions_panel, system_settings_panel, leaderboard_panel,
-    add_tag_prompt, remove_tag_menu, remove_tag_confirm, execute_tag_deletion, list_all_tags,
-    add_admin_prompt, list_admins, remove_admin_menu, remove_admin_confirm, execute_admin_removal,
-    set_setting_prompt, set_start_message_prompt, show_all_commands,
-    selective_remove_menu, confirm_user_removal, execute_user_removal
+    god_mode_command, settings_menu, process_admin_input, tags_panel, permissions_panel, 
+    system_settings_panel, leaderboard_panel, add_tag_prompt, remove_tag_menu, remove_tag_confirm, 
+    execute_tag_deletion, list_all_tags, add_admin_prompt, list_admins, remove_admin_menu, 
+    remove_admin_confirm, execute_admin_removal, set_setting_prompt, set_start_message_prompt, 
+    show_all_commands, selective_remove_menu, confirm_user_removal, execute_user_removal
 )
 
 TELEGRAM_BOT_TOKEN = environ["TELEGRAM_BOT_TOKEN"]
@@ -54,8 +50,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
     keyboard = [
-        [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
-        [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
+        [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1"), InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
         [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
     ]
     if await is_admin(user.id):
@@ -65,10 +60,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
         await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'waiting_for' in context.user_data:
-        del context.user_data['waiting_for']; await update.message.reply_text("操作已取消。")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -84,33 +75,26 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "admin_tags_add_recommend_prompt": lambda u, c: add_tag_prompt(u, c, 'recommend'),
         "admin_tags_add_block_prompt": lambda u, c: add_tag_prompt(u, c, 'block'),
         "admin_perms_add_prompt": add_admin_prompt, "admin_system_set_start_message": set_start_message_prompt,
-        "admin_system_set_prompt_auto_delete_timeout": lambda u, c: set_setting_prompt(u, c, 'auto_delete_timeout'),
-        "admin_system_set_prompt_admin_password": lambda u, c: set_setting_prompt(u, c, 'admin_password'),
         "confirm_data_erasure": confirm_data_erasure, "cancel_data_erasure": cancel_data_erasure,
     }
     if data in simple_handlers:
         await simple_handlers[data](update, context); return
 
+    # 终极修复：更新所有正则表达式，使其更健壮
     patterns = {
         r"leaderboard_(top|bottom)_(\d+)": lambda m: leaderboard_menu(update, context, m[0], int(m[1])),
         r"leaderboard_refresh_(top|bottom)_(\d+)": lambda m: refresh_leaderboard(update, context, m[0], int(m[1])),
         r"my_favorites_(\d+)": lambda m: my_favorites_list(update, context, int(m[0])),
-        r"vote_(recommend|block)_(\d+)_(\d+)_(.*)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2]), m[3]),
-        r"process_vote_(\d+)_(\d+)_(.*)": lambda m: process_vote(update, context, int(m[0]), int(m[1]), m[2]),
-        r"back_to_rep_card_(\d+)_(.*)": lambda m: back_to_rep_card(update, context, int(m[0]), m[1]),
-        r"rep_card_query_(\d+)_?(.*)": lambda m: send_reputation_card(update, context, int(m[0]), m[1]),
-        r"add_favorite_(\d+)": lambda m: add_favorite(update, context, int(m[0])),
+        r"vote_(recommend|block)_(\d+)_(\d+)_(.*)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2]), m[3] or ""),
+        r"process_vote_(\d+)_(\d+)_(.*)": lambda m: process_vote(update, context, int(m[0]), int(m[1]), m[2] or ""),
+        r"back_to_rep_card_(\d+)_(.*)": lambda m: back_to_rep_card(update, context, int(m[0]), m[1] or ""),
+        r"rep_card_query_(\d+)_(.*)": lambda m: send_reputation_card(update, context, int(m[0]), m[1] or ""),
+        r"add_favorite_(\d+)_(.*)": lambda m: add_favorite(update, context, int(m[0]), m[1] or ""),
         r"remove_favorite_(\d+)": lambda m: remove_favorite(update, context, int(m[0])),
-        r"stats_user_(\d+)(?:_(\d+))?": lambda m: user_stats_menu(update, context, int(m[0]), int(m[1] or 1)),
+        r"stats_user_(\d+)_(\d+)_(.*)": lambda m: user_stats_menu(update, context, int(m[0]), int(m[1]), m[2] or ""),
         r"admin_tags_remove_menu_(\d+)": lambda m: remove_tag_menu(update, context, int(m[0])),
         r"admin_tags_remove_confirm_(\d+)_(\d+)": lambda m: remove_tag_confirm(update, context, int(m[0]), int(m[1])),
         r"admin_tag_delete_(\d+)": lambda m: execute_tag_deletion(update, context, int(m[0])),
-        r"admin_perms_remove_menu_(\d+)": lambda m: remove_admin_menu(update, context, int(m[0])),
-        r"admin_perms_remove_confirm_(\d+)_(\d+)": lambda m: remove_admin_confirm(update, context, int(m[0]), int(m[1])),
-        r"admin_remove_admin_(\d+)": lambda m: execute_admin_removal(update, context, int(m[0])),
-        r"admin_selective_remove_(top|bottom)_(\d+)": lambda m: selective_remove_menu(update, context, m[0], int(m[1])),
-        r"admin_confirm_remove_user_(\d+)_(top|bottom)_(\d+)": lambda m: confirm_user_removal(update, context, int(m[0]), m[1], int(m[2])),
-        r"admin_execute_removal_(clear_all|clear_neg)_(\d+)_(top|bottom)_(\d+)": lambda m: execute_user_removal(update, context, int(m[1]), m[0], m[2], int(m[3])),
     }
     
     for pattern, handler in patterns.items():
@@ -118,21 +102,26 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         if match: await handler(match.groups()); return
     logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
 
+# Lifespan and FastAPI app setup remains the same...
 ptb_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
+    # Command handlers
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
     ptb_app.add_handler(CommandHandler("myfavorites", my_favorites_list, filters=filters.ChatType.PRIVATE))
     ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
-    ptb_app.add_handler(CommandHandler("cancel", cancel_command, filters=filters.ChatType.PRIVATE))
+    ptb_app.add_handler(CommandHandler("cancel", CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE)))
     ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
+    # Message handlers
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
+    # Callback query handler
     ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
+
     await init_db()
     if RENDER_EXTERNAL_URL:
         await ptb_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook", allowed_updates=Update.ALL_TYPES)
