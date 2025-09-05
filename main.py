@@ -22,7 +22,6 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# 修正：从 database 导入 is_admin
 from database import init_db, get_pool, get_setting, get_or_create_user, is_admin
 from handlers.reputation import handle_query, vote_menu, process_vote, back_to_rep_card, send_reputation_card
 from handlers.leaderboard import leaderboard_menu, refresh_leaderboard, admin_clear_leaderboard_cache
@@ -41,37 +40,40 @@ from handlers.admin import (
 TELEGRAM_BOT_TOKEN = environ["TELEGRAM_BOT_TOKEN"]
 RENDER_EXTERNAL_URL = environ.get("RENDER_EXTERNAL_URL")
 
+# --- 新增：全局错误处理器 ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """记录所有由更新引起的错误，并向用户发送通知（如果可能）。"""
+    logger.error("处理更新时发生异常", exc_info=context.error)
+    
+    # 尝试通知用户发生了错误
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ 处理您的请求时发生了一个内部错误，管理员已收到通知。"
+            )
+        except Exception as e:
+            logger.error(f"无法向用户发送错误通知: {e}")
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    显示主菜单。
-    '管理面板' 按钮只对管理员可见。
-    """
     user = update.effective_user
     message = update.effective_message or update.callback_query.message
-    
-    # 确保用户存在于数据库中
     await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
-
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
     
-    # 构建基础键盘
     keyboard = [
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
         [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
         [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
     ]
-    
-    # 检查用户是否为管理员
     if await is_admin(user.id):
         keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
-
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
         await message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'waiting_for' in context.user_data:
@@ -83,32 +85,19 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     data = query.data
     
-    # 确保执行操作的用户存在于数据库
-    await get_or_create_user(
-        user_id=query.from_user.id, 
-        username=query.from_user.username, 
-        first_name=query.from_user.first_name
-    )
+    await get_or_create_user(user_id=query.from_user.id, username=query.from_user.username, first_name=query.from_user.first_name)
     
     simple_handlers = {
-        "back_to_help": start_command,
-        "admin_settings_menu": settings_menu,
-        "admin_panel_tags": tags_panel,
-        "admin_panel_permissions": permissions_panel,
-        "admin_panel_system": system_settings_panel,
-        "admin_leaderboard_panel": leaderboard_panel,
-        "admin_leaderboard_clear_cache": admin_clear_leaderboard_cache,
-        "admin_tags_list": list_all_tags,
-        "admin_perms_list": list_admins,
-        "admin_show_commands": show_all_commands,
+        "back_to_help": start_command, "admin_settings_menu": settings_menu, "admin_panel_tags": tags_panel,
+        "admin_panel_permissions": permissions_panel, "admin_panel_system": system_settings_panel,
+        "admin_leaderboard_panel": leaderboard_panel, "admin_leaderboard_clear_cache": admin_clear_leaderboard_cache,
+        "admin_tags_list": list_all_tags, "admin_perms_list": list_admins, "admin_show_commands": show_all_commands,
         "admin_tags_add_recommend_prompt": lambda u, c: add_tag_prompt(u, c, 'recommend'),
         "admin_tags_add_block_prompt": lambda u, c: add_tag_prompt(u, c, 'block'),
-        "admin_perms_add_prompt": add_admin_prompt,
-        "admin_system_set_start_message": set_start_message_prompt,
+        "admin_perms_add_prompt": add_admin_prompt, "admin_system_set_start_message": set_start_message_prompt,
         "admin_system_set_prompt_auto_delete_timeout": lambda u, c: set_setting_prompt(u, c, 'auto_delete_timeout'),
         "admin_system_set_prompt_admin_password": lambda u, c: set_setting_prompt(u, c, 'admin_password'),
-        "confirm_data_erasure": confirm_data_erasure,
-        "cancel_data_erasure": cancel_data_erasure,
+        "confirm_data_erasure": confirm_data_erasure, "cancel_data_erasure": cancel_data_erasure,
     }
     if data in simple_handlers:
         await simple_handlers[data](update, context)
@@ -138,10 +127,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     
     for pattern, handler in patterns.items():
         match = re.fullmatch(pattern, data)
-        if match:
-            await handler(match.groups())
-            return
-    
+        if match: await handler(match.groups()); return
     logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
 
 ptb_app = None
@@ -150,6 +136,9 @@ ptb_app = None
 async def lifespan(app: FastAPI):
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # --- 注册全局错误处理器 ---
+    ptb_app.add_error_handler(error_handler)
 
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
