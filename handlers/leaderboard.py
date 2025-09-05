@@ -1,291 +1,270 @@
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
-from database import db_fetch_all, db_fetch_one, db_fetchval, update_user_activity, get_setting
+from database import (
+    db_transaction, db_fetch_one, db_fetch_all, db_fetchval,
+    update_user_activity, get_setting
+)
+from .utils import schedule_message_deletion
 
 logger = logging.getLogger(__name__)
 
-# 缓存设置
-_leaderboard_cache = {}
-_cache_expiry = {}
-_cache_duration = timedelta(minutes=5) # 缓存5分钟
+# --- 主查询入口 ---
 
-def clear_leaderboard_cache():
-    """清空排行榜缓存"""
-    global _leaderboard_cache, _cache_expiry
-    _leaderboard_cache = {}
-    _cache_expiry = {}
-    logger.info("已清空排行榜缓存")
+async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理对用户声誉的查询 (通过 @username, user_id, 或回复消息)"""
+    query_user = update.effective_user
+    await update_user_activity(query_user.id, query_user.username, query_user.first_name)
 
-async def get_leaderboard_data(board_type: str, tag_filter: Optional[int] = None, page: int = 1) -> Tuple[List[Dict], int]:
-    """获取排行榜数据（已修复）"""
-    global _leaderboard_cache, _cache_expiry
-    
-    cache_key = f"{board_type}_{tag_filter}_{page}"
-    now = datetime.now()
-    
-    if cache_key in _leaderboard_cache and _cache_expiry.get(cache_key, now) > now:
-        logger.info(f"从缓存中获取排行榜数据: {cache_key}")
-        return _leaderboard_cache[cache_key]
-    
-    logger.info(f"从数据库查询排行榜数据: {cache_key}")
-    
-    try:
-        min_votes_str = await get_setting('min_votes_for_leaderboard')
-        page_size_str = await get_setting('leaderboard_size')
-        min_votes = int(min_votes_str) if min_votes_str and min_votes_str.isdigit() else 3
-        page_size = int(page_size_str) if page_size_str and page_size_str.isdigit() else 10
-    except (ValueError, TypeError):
-        min_votes = 3
-        page_size = 10
-    
-    offset = (page - 1) * page_size
-    
-    # **最终修复**: 确保所有对标签列的引用都是 `r.tag_id` (单数)
-    base_query = """
-        WITH user_stats AS (
-            SELECT 
-                u.id,
-                u.username,
-                u.first_name as display_name,
-                COUNT(r.id) as total_votes,
-                COUNT(r.id) FILTER (WHERE r.is_positive = TRUE) as positive_votes,
-                COUNT(r.id) FILTER (WHERE r.is_positive = FALSE) as negative_votes,
-                COUNT(DISTINCT r.voter_id) as unique_voters
-            FROM users u
-            JOIN reputations r ON u.id = r.target_id
-    """
-    
-    params = []
-    where_clauses = []
-    
-    if tag_filter:
-        params.append(tag_filter)
-        where_clauses.append(f"${len(params)} = ANY(r.tag_id)") # <--- 修正点
-    
-    if where_clauses:
-        base_query += " WHERE " + " AND ".join(where_clauses)
-        
-    base_query += """
-            GROUP BY u.id, u.username, u.first_name
-            HAVING COUNT(r.id) >= ${param_idx}
-        )
-        SELECT 
-            id, username, display_name, total_votes, positive_votes, negative_votes, unique_voters,
-            CASE 
-                WHEN total_votes > 0 THEN ROUND((positive_votes::float / total_votes) * 100)
-                ELSE 0
-            END as reputation_score
-        FROM user_stats
-    """.replace("${param_idx}", f"${len(params) + 1}")
-    
-    if board_type == "top":
-        base_query += " ORDER BY reputation_score DESC, total_votes DESC"
+    target_user_id = None
+    target_username = None
+
+    # 1. 检查是否回复消息
+    if update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        target_user_id = target_user.id
+        await update_user_activity(target_user.id, target_user.username, target_user.first_name)
+
+    # 2. 检查消息文本中的 @username 或 user_id
     else:
-        base_query += " ORDER BY reputation_score ASC, total_votes DESC"
-    
-    base_query += f" LIMIT ${len(params) + 2} OFFSET ${len(params) + 3}"
-    
-    final_params = params + [min_votes, page_size, offset]
-    
-    try:
-        results = await db_fetch_all(base_query, *final_params)
-        
-        # **最终修复**: 修正获取总数的查询
-        count_query_parts = [
-            "SELECT COUNT(*) FROM (",
-            "SELECT r.target_id FROM reputations r"
-        ]
-        count_params = []
-        
-        count_where_clauses = []
-        if tag_filter:
-            count_params.append(tag_filter)
-            count_where_clauses.append(f"${len(count_params)} = ANY(r.tag_id)") # <--- 修正点
-        
-        if count_where_clauses:
-            count_query_parts.append("WHERE " + " AND ".join(count_where_clauses))
+        # 移除了 '查询' 关键字要求，直接匹配 @ 或数字
+        match = re.search(r'@(\w+)|(\d{5,})', update.message.text)
+        if match:
+            if match.group(1): # @username
+                target_username = match.group(1)
+                user_data = await db_fetch_one("SELECT id FROM users WHERE username = $1", target_username)
+                if user_data:
+                    target_user_id = user_data['id']
+                else:
+                    await update.message.reply_text(f"我还没有关于 @{target_username} 的信息。")
+                    return
+            elif match.group(2): # user_id
+                try:
+                    target_user_id = int(match.group(2))
+                    # 验证用户是否存在
+                    if not await db_fetch_one("SELECT id FROM users WHERE id = $1", target_user_id):
+                        await update.message.reply_text(f"我还没有关于用户ID {target_user_id} 的信息。")
+                        return
+                except ValueError:
+                    pass # 不是有效的ID
 
-        count_query_parts.append(f"GROUP BY r.target_id HAVING COUNT(r.id) >= ${len(count_params) + 1}")
-        count_query_parts.append(") as filtered")
-        
-        count_query = " ".join(count_query_parts)
-        final_count_params = count_params + [min_votes]
-
-        total_count = await db_fetchval(count_query, *final_count_params) or 0
-        
-        leaderboard_data = [dict(row) for row in results]
-        
-        result = (leaderboard_data, total_count)
-        _leaderboard_cache[cache_key] = result
-        _cache_expiry[cache_key] = now + _cache_duration
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"获取排行榜数据失败: {e}", exc_info=True)
-        return ([], 0)
-
-async def show_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示排行榜"""
-    query = update.callback_query
-    data = query.data
-    
-    await update_user_activity(update.effective_user.id, update.effective_user.username, update.effective_user.first_name)
-    
-    parts = data.split("_")
-    # 兼容旧的回调格式 leaderboard_top_1 / leaderboard_bottom_tagselect_1
-    if len(parts) > 2 and parts[2] == 'tagselect':
-        board_type = parts[1]
-        await show_tag_selection(update, context, board_type, 1)
+    if not target_user_id:
+        # 如果没有明确目标，显示帮助或自己的信息
+        await show_help_or_self_rep(update, context)
         return
 
-    # 新的回调格式 leaderboard_TYPE_ACTION_PARAM_PAGE
-    # 例如: leaderboard_top_all_1, leaderboard_top_tag_123_1
-    board_type = parts[1]
-    action = parts[2] if len(parts) > 2 else 'all' # 默认为 all
-    
-    try:
-        if action == "tagselect":
-            page = int(parts[3]) if len(parts) > 3 else 1
-            await show_tag_selection(update, context, board_type, page)
-        elif action == "all":
-            page = int(parts[3]) if len(parts) > 3 else 1
-            await display_leaderboard(update, context, board_type, None, page)
-        elif action == "tag":
-            tag_id = int(parts[3])
-            page = int(parts[4]) if len(parts) > 4 else 1
-            await display_leaderboard(update, context, board_type, tag_id, page)
-        else: # 兼容旧格式
-            page = int(action)
-            tag_id = int(parts[3]) if len(parts) > 3 else None
-            await display_leaderboard(update, context, board_type, tag_id, page)
-            
-    except (ValueError, IndexError) as e:
-        logger.error(f"解析排行榜回调数据失败: {data}, 错误: {e}")
+    # 生成并发送声誉卡片
+    await send_reputation_card(update, context, target_user_id)
 
-async def show_tag_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, page: int = 1):
-    """显示标签选择页面"""
-    query = update.callback_query
-    await query.answer()
-    
-    per_page = 8
-    offset = (page - 1) * per_page
-    
-    try:
-        tags = await db_fetch_all("SELECT id, name, type FROM tags ORDER BY type = 'recommend' DESC, name LIMIT $1 OFFSET $2", per_page, offset)
-        total_tags = await db_fetchval("SELECT COUNT(*) FROM tags") or 0
-        total_pages = (total_tags + per_page - 1) // per_page if total_tags > 0 else 1
-        
-    except Exception as e:
-        logger.error(f"获取标签失败: {e}", exc_info=True)
-        await display_leaderboard(update, context, board_type, None, 1)
-        return
-    
-    title = "🏆 英灵殿" if board_type == "top" else "☠️ 放逐深渊"
-    message = f"**{title}** - 选择标签分类\n\n选择标签筛选排行榜，或查看全部："
-    
-    keyboard = [[InlineKeyboardButton("🌟 查看全部", callback_data=f"leaderboard_{board_type}_all_1")]]
-    
-    if tags:
-        for i in range(0, len(tags), 2):
-            row = [InlineKeyboardButton(f"{'🏅' if tag['type'] == 'recommend' else '⚠️'} {tag['name']}", callback_data=f"leaderboard_{board_type}_tag_{tag['id']}_1") for tag in tags[i:i+2]]
-            keyboard.append(row)
-    else:
-        keyboard.append([InlineKeyboardButton("📝 暂无标签", callback_data="noop")])
-    
-    if total_pages > 1:
-        nav_row = []
-        if page > 1: nav_row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"leaderboard_{board_type}_tagselect_{page-1}"))
-        if page < total_pages: nav_row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"leaderboard_{board_type}_tagselect_{page+1}"))
-        if nav_row: keyboard.append(nav_row)
-    
-    opposite_type = "bottom" if board_type == "top" else "top"
-    opposite_title = "☠️ 放逐深渊" if board_type == "top" else "🏆 英灵殿"
-    keyboard.append([InlineKeyboardButton(f"🔄 切换到{opposite_title}", callback_data=f"leaderboard_{opposite_type}_tagselect_1")])
-    keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
-    
+async def show_help_or_self_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """在没有明确查询目标时，显示帮助信息或用户自己的声誉"""
+    # 在这个版本，我们简化为只显示帮助信息
+    start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
+    keyboard = [
+        [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
+        [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
+        [InlineKeyboardButton("❤️ 我的收藏", callback_data="my_favorites_1")],
+        [InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    try:
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"编辑标签选择消息失败: {e}")
+    sent_message = await update.message.reply_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    await schedule_message_deletion(context, sent_message.chat.id, sent_message.message_id)
 
-async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, board_type: str, tag_id: Optional[int], page: int = 1):
-    """显示排行榜内容"""
-    query = update.callback_query
-    await query.answer()
-    
+# --- 声誉卡片生成与发送 ---
+
+async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """生成并发送指定用户的声誉卡片"""
     try:
-        leaderboard_data, total_count = await get_leaderboard_data(board_type, tag_id, page)
+        card_data = await build_reputation_card_data(target_user_id)
+        if not card_data:
+            await update.message.reply_text("无法获取该用户的声誉信息。")
+            return
+
+        is_favorite = await db_fetch_one("SELECT 1 FROM favorites WHERE user_id = $1 AND target_user_id = $2", update.effective_user.id, target_user_id)
         
-        tag_name = None
-        if tag_id:
-            tag_info = await db_fetch_one("SELECT name, type FROM tags WHERE id = $1", tag_id)
-            if tag_info: tag_name = f"{'🏅' if tag_info['type'] == 'recommend' else '⚠️'} {tag_info['name']}"
-        
-        title = "🏆 英灵殿" if board_type == "top" else "☠️ 放逐深渊"
-        subtitle = f" - {tag_name}" if tag_name else ""
-        message = f"**{title}{subtitle}**\n\n"
-        
-        if not leaderboard_data:
-            message += "🌟 这里还很空旷，快来成为第一个上榜的人吧！"
-        else:
-            page_size_str = await get_setting('leaderboard_size')
-            page_size = int(page_size_str) if page_size_str and page_size_str.isdigit() else 10
-            start_rank = (page - 1) * page_size + 1
-            
-            for i, user in enumerate(leaderboard_data):
-                rank = start_rank + i
-                display_name = user.get('display_name') or f"@{user.get('username')}" if user.get('username') else f"用户{user.get('id')}"
-                display_name = (display_name[:12] + "...") if len(display_name) > 15 else display_name
-                
-                rank_icon = f"{rank}."
-                if board_type == "top":
-                    if rank == 1: rank_icon = "🥇"
-                    elif rank == 2: rank_icon = "🥈"
-                    elif rank == 3: rank_icon = "🥉"
-                
-                score = user.get('reputation_score', 0)
-                if score >= 90: level_icon = "⭐"
-                elif score >= 75: level_icon = "✅"
-                elif score >= 60: level_icon = "⚖️"
-                elif score >= 40: level_icon = "⚠️"
-                else: level_icon = "💀"
-                
-                message += f"{rank_icon} {level_icon} **{display_name}**\n   📊 {score}% ({user.get('positive_votes', 0)}👍/{user.get('negative_votes', 0)}👎)\n\n"
-        
-        page_size_str = await get_setting('leaderboard_size')
-        page_size = int(page_size_str) if page_size_str and page_size_str.isdigit() else 10
-        total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-        
-        if total_pages > 1: message += f"第 {page}/{total_pages} 页 · 共 {total_count} 人"
-        
-        keyboard = []
-        if total_pages > 1:
-            nav_row = []
-            callback_prefix = f"leaderboard_{board_type}_tag_{tag_id}" if tag_id else f"leaderboard_{board_type}_all"
-            if page > 1: nav_row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"{callback_prefix}_{page-1}"))
-            if page < total_pages: nav_row.append(InlineKeyboardButton("▶️ 下一页", callback_data=f"{callback_prefix}_{page+1}"))
-            if nav_row: keyboard.append(nav_row)
-        
-        keyboard.append([InlineKeyboardButton("🏷️ 标签筛选", callback_data=f"leaderboard_{board_type}_tagselect_1")])
-        keyboard.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")])
+        text, keyboard = format_reputation_card(card_data, is_favorite)
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(message, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        sent_message = await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         
+        # 安排消息自动删除
+        await schedule_message_deletion(context, sent_message.chat.id, sent_message.message_id)
+
     except Exception as e:
-        logger.error(f"显示排行榜失败: {e}", exc_info=True)
-        error_message = "❌ 获取排行榜数据时出错，请稍后重试。"
-        error_keyboard = [[InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]]
-        try:
-            await query.edit_message_text(error_message, reply_markup=InlineKeyboardMarkup(error_keyboard))
-        except Exception as edit_error:
-            logger.error(f"显示错误消息失败: {edit_error}")
+        logger.error(f"发送声誉卡片失败 (用户ID: {target_user_id}): {e}", exc_info=True)
+        await update.message.reply_text("❌ 生成声誉卡片时出错。")
+
+async def build_reputation_card_data(target_user_id: int):
+    """从数据库收集构建声誉卡片所需的数据"""
+    query = """
+    WITH user_info AS (
+        SELECT id, first_name, username FROM users WHERE id = $1
+    ),
+    votes_summary AS (
+        SELECT
+            t.type,
+            t.name,
+            COUNT(v.id) as count
+        FROM votes v
+        JOIN tags t ON v.tag_id = t.id
+        WHERE v.target_user_id = $1
+        GROUP BY t.type, t.name
+    ),
+    recommend_votes AS (
+        SELECT name, count FROM votes_summary WHERE type = 'recommend' ORDER BY count DESC, name ASC
+    ),
+    block_votes AS (
+        SELECT name, count FROM votes_summary WHERE type = 'block' ORDER BY count DESC, name ASC
+    )
+    SELECT
+        (SELECT * FROM user_info) as user_data,
+        (SELECT COALESCE(json_agg(reco), '[]'::json) FROM recommend_votes reco) as recommend_tags,
+        (SELECT COALESCE(json_agg(bl), '[]'::json) FROM block_votes bl) as block_tags;
+    """
+    data = await db_fetch_one(query, target_user_id)
+    
+    if not data or not data['user_data']:
+        # 如果用户在votes表里有记录但在users表里没有，需要补充信息
+        user_in_votes = await db_fetchval("SELECT 1 FROM votes WHERE target_user_id = $1 LIMIT 1", target_user_id)
+        if user_in_votes:
+            # 这是一个边缘情况，最好有一个用户数据同步机制
+            await update_user_activity(target_user_id, None, f"用户{target_user_id}")
+            # 再次尝试获取数据
+            data = await db_fetch_one(query, target_user_id)
+            if not data or not data['user_data']:
+                return None
+        else:
+            return None # 用户确实不存在
+
+    return data
+
+def format_reputation_card(data: dict, is_favorite: bool):
+    """将数据格式化为文本和键盘布局"""
+    user_data = data['user_data']
+    recommend_tags = data['recommend_tags']
+    block_tags = data['block_tags']
+
+    display_name = user_data['first_name'] or (f"@{user_data['username']}" if user_data['username'] else f"用户{user_data['id']}")
+    
+    total_recommend = sum(tag['count'] for tag in recommend_tags)
+    total_block = sum(tag['count'] for tag in block_tags)
+    net_score = total_recommend - total_block
+
+    # 构建文本
+    text = f"**声誉档案 - {display_name}**\n"
+    text += f"综合评价: **{net_score}** (👍{total_recommend} / 👎{total_block})\n\n"
+
+    if recommend_tags:
+        text += "👍 **收到好评:**\n"
+        text += "、".join([f"{tag['name']} ({tag['count']})" for tag in recommend_tags]) + "\n\n"
+    
+    if block_tags:
+        text += "👎 **收到差评:**\n"
+        text += "、".join([f"{tag['name']} ({tag['count']})" for tag in block_tags]) + "\n\n"
+
+    if not recommend_tags and not block_tags:
+        text += "*暂无评价记录。*\n\n"
+
+    text += f"_(用户ID: `{user_data['id']}`)_"
+
+    # 构建键盘
+    favorite_text = "❤️ 已收藏" if is_favorite else "🤍 添加收藏"
+    favorite_callback = "remove_favorite_" if is_favorite else "add_favorite_"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("👍 给好评", callback_data=f"vote_recommend_{user_data['id']}_1"),
+            InlineKeyboardButton("👎 给差评", callback_data=f"vote_block_{user_data['id']}_1")
+        ],
+        [
+            InlineKeyboardButton(favorite_text, callback_data=f"{favorite_callback}{user_data['id']}"),
+            InlineKeyboardButton("📊 统计", callback_data=f"stats_user_{user_data['id']}")
+        ]
+    ]
+    return text, keyboard
+
+# --- 投票处理 ---
+
+async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int, vote_type: str, page: int):
+    """显示好评或差评的标签菜单以供选择"""
+    query = update.callback_query
+    await query.answer()
+
+    tags = await db_fetch_all("SELECT name FROM tags WHERE type = $1 ORDER BY name", vote_type)
+    if not tags:
+        await query.answer("管理员尚未设置任何标签！", show_alert=True)
+        return
+        
+    vote_type_text = "好评" if vote_type == "recommend" else "差评"
+    
+    keyboard = []
+    for tag in tags:
+        keyboard.append([InlineKeyboardButton(tag['name'], callback_data=f"process_vote_{target_user_id}_{tag['name']}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 返回声誉卡片", callback_data=f"back_to_rep_card_{target_user_id}")])
+    
+    await query.edit_message_text(f"请为该用户选择一个**{vote_type_text}**标签：", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int, tag_name: str):
+    """处理用户的投票选择，并更新数据库"""
+    query = update.callback_query
+    voter_user_id = query.from_user.id
+
+    if voter_user_id == target_user_id:
+        await query.answer("❌ 你不能给自己投票。", show_alert=True)
+        return
+
+    try:
+        async with db_transaction() as conn:
+            # 获取tag_id
+            tag = await conn.fetchrow("SELECT id, type FROM tags WHERE name = $1", tag_name)
+            if not tag:
+                await query.answer("❌ 标签不存在，可能已被管理员删除。", show_alert=True)
+                return
+            tag_id = tag['id']
+            tag_type = tag['type']
+
+            # 检查是否已存在相同投票
+            existing_vote = await conn.fetchval(
+                "SELECT id FROM votes WHERE voter_user_id = $1 AND target_user_id = $2 AND tag_id = $3",
+                voter_user_id, target_user_id, tag_id
+            )
+            if existing_vote:
+                await query.answer("❌ 你已经使用这个标签评价过该用户了。", show_alert=True)
+                return
+
+            # 插入新投票
+            await conn.execute(
+                """
+                INSERT INTO votes (voter_user_id, target_user_id, tag_id, message_id, chat_id)
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                voter_user_id, target_user_id, tag_id, query.message.message_id, query.message.chat.id
+            )
+            
+            vote_type_text = "好评" if tag_type == "recommend" else "差评"
+            await query.answer(f"✅ {vote_type_text}成功！", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"处理投票失败 (voter: {voter_user_id}, target: {target_user_id}, tag: {tag_name}): {e}")
+        await query.answer("❌ 操作失败，发生数据库错误。", show_alert=True)
+
+    # 投票后刷新声誉卡片
+    await back_to_rep_card(update, context, target_user_id)
+
+async def back_to_rep_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int):
+    """回调函数，用于从其他菜单返回到声誉卡片"""
+    query = update.callback_query
+    await query.answer()
+
+    card_data = await build_reputation_card_data(target_user_id)
+    if not card_data:
+        await query.edit_message_text("无法获取该用户的声誉信息。")
+        return
+
+    is_favorite = await db_fetch_one("SELECT 1 FROM favorites WHERE user_id = $1 AND target_user_id = $2", query.from_user.id, target_user_id)
+    text, keyboard = format_reputation_card(card_data, is_favorite)
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
