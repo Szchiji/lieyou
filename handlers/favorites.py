@@ -2,8 +2,8 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
-# 修正：移除了 reputation 的导入，并加入了 db_fetch_val
-from database import db_execute, db_fetch_all, db_fetch_val, get_or_create_user
+# 修正：将 db_fetch_val 改为正确的 db_fetchval
+from database import db_execute, db_fetch_all, db_fetchval, get_or_create_user
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +44,11 @@ async def remove_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
 
 async def my_favorites_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
     """显示用户的收藏列表，使用 pkid"""
-    # 如果来自命令，update.callback_query 为 None
     is_callback = update.callback_query is not None
     if is_callback:
         query = update.callback_query
         user_id = query.from_user.id
-    else: # 来自 /myfavorites 命令
+    else: 
         message = update.effective_message
         user_id = message.from_user.id
 
@@ -69,7 +68,8 @@ async def my_favorites_list(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             user['pkid'], per_page, offset
         )
         
-        total_favs = await db_fetch_val(
+        # 修正：将 db_fetch_val 改为正确的 db_fetchval
+        total_favs = await db_fetchval(
             "SELECT COUNT(*) FROM favorites WHERE user_pkid = $1", user['pkid']
         ) or 0
         total_pages = max(1, (total_favs + per_page - 1) // per_page)
@@ -86,7 +86,6 @@ async def my_favorites_list(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     InlineKeyboardButton("❌", callback_data=f"remove_favorite_{fav['pkid']}")
                 ])
         
-        # 分页按钮
         nav_row = []
         if page > 1: nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"my_favorites_{page-1}"))
         if page < total_pages: nav_row.append(InlineKeyboardButton("➡️ 下一页", callback_data=f"my_favorites_{page+1}"))
