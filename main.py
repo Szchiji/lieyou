@@ -80,12 +80,12 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if data in simple_handlers:
         await simple_handlers[data](update, context); return
 
-    # 终极修复：更新所有正则表达式，使其更健壮
+    # 核心改动：更新正则表达式以适应新逻辑
     patterns = {
         r"leaderboard_(top|bottom)_(\d+)": lambda m: leaderboard_menu(update, context, m[0], int(m[1])),
         r"leaderboard_refresh_(top|bottom)_(\d+)": lambda m: refresh_leaderboard(update, context, m[0], int(m[1])),
         r"my_favorites_(\d+)": lambda m: my_favorites_list(update, context, int(m[0])),
-        r"vote_(recommend|block)_(\d+)_(\d+)_(.*)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2]), m[3] or ""),
+        r"vote_(recommend|block)_(\d+)_(.*)": lambda m: vote_menu(update, context, int(m[1]), m[0], m[2] or ""),
         r"process_vote_(\d+)_(\d+)_(.*)": lambda m: process_vote(update, context, int(m[0]), int(m[1]), m[2] or ""),
         r"back_to_rep_card_(\d+)_(.*)": lambda m: back_to_rep_card(update, context, int(m[0]), m[1] or ""),
         r"rep_card_query_(\d+)_(.*)": lambda m: send_reputation_card(update, context, int(m[0]), m[1] or ""),
@@ -95,41 +95,37 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         r"admin_tags_remove_menu_(\d+)": lambda m: remove_tag_menu(update, context, int(m[0])),
         r"admin_tags_remove_confirm_(\d+)_(\d+)": lambda m: remove_tag_confirm(update, context, int(m[0]), int(m[1])),
         r"admin_tag_delete_(\d+)": lambda m: execute_tag_deletion(update, context, int(m[0])),
+        r"admin_perms_remove_menu_(\d+)": lambda m: remove_admin_menu(update, context, int(m[0])),
+        r"admin_perms_remove_confirm_(\d+)_(\d+)": lambda m: remove_admin_confirm(update, context, int(m[0]), int(m[1])),
+        r"admin_remove_admin_(\d+)": lambda m: execute_admin_removal(update, context, int(m[0])),
     }
     
     for pattern, handler in patterns.items():
         match = re.fullmatch(pattern, data)
-        if match: await handler(match.groups()); return
+        if match:
+            await handler(match.groups())
+            return
+            
     logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
 
-# Lifespan and FastAPI app setup remains the same...
 ptb_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     ptb_app.add_error_handler(error_handler)
-    # Command handlers
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
-    ptb_app.add_handler(CommandHandler("myfavorites", my_favorites_list, filters=filters.ChatType.PRIVATE))
-    ptb_app.add_handler(CommandHandler("erase_my_data", request_data_erasure, filters=filters.ChatType.PRIVATE))
-    ptb_app.add_handler(CommandHandler("cancel", CommandHandler("cancel", lambda u,c: u.message.reply_text("操作已取消。") if 'waiting_for' in c.user_data and c.user_data.pop('waiting_for') else None, filters=filters.ChatType.PRIVATE)))
-    ptb_app.add_handler(CommandHandler("godmode", god_mode_command, filters=filters.ChatType.PRIVATE))
-    # Message handlers
-    ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
-    # Callback query handler
     ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
-
     await init_db()
     if RENDER_EXTERNAL_URL:
         await ptb_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook", allowed_updates=Update.ALL_TYPES)
         logger.info(f"Webhook已设置为: {RENDER_EXTERNAL_URL}/webhook")
     await ptb_app.initialize()
-    if ptb_app.post_init: await ptb_app.post_init(ptb_app)
+    if hasattr(ptb_app, 'post_init'): await ptb_app.post_init(ptb_app)
     yield
-    if ptb_app.post_shutdown: await ptb_app.post_shutdown(ptb_app)
+    if hasattr(ptb_app, 'post_shutdown'): await ptb_app.post_shutdown(ptb_app)
     await ptb_app.shutdown()
     db_pool = await get_pool()
     if db_pool: await db_pool.close(); logger.info("数据库连接池已关闭。")
@@ -138,14 +134,17 @@ fastapi_app = FastAPI(lifespan=lifespan)
 @fastapi_app.post("/webhook")
 async def webhook(request: Request):
     try:
-        data = await request.json(); update = Update.de_json(data, ptb_app.bot)
+        data = await request.json()
+        update = Update.de_json(data, ptb_app.bot)
         await ptb_app.process_update(update)
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"处理webhook时出错: {e}", exc_info=True)
         return Response(status_code=500)
+
 @fastapi_app.get("/")
 def index(): return {"status": "ok", "bot": "神谕者机器人正在运行"}
+
 if __name__ == "__main__":
     port = int(environ.get("PORT", 8000))
     uvicorn.run("main:fastapi_app", host="0.0.0.0", port=port, reload=False)
