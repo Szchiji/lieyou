@@ -44,10 +44,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("处理更新时发生异常", exc_info=context.error)
     if isinstance(update, Update) and update.effective_chat:
         try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ 处理您的请求时发生了一个内部错误，管理员已收到通知。"
-            )
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ 处理您的请求时发生了一个内部错误，管理员已收到通知。")
         except Exception as e:
             logger.error(f"无法向用户发送错误通知: {e}")
 
@@ -56,7 +53,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.callback_query.message
     await get_or_create_user(user_id=user.id, username=user.username, first_name=user.first_name)
     start_message = await get_setting('start_message', "欢迎使用神谕者机器人！")
-    
     keyboard = [
         [InlineKeyboardButton("🏆 好评榜", callback_data="leaderboard_top_1")],
         [InlineKeyboardButton("☠️ 差评榜", callback_data="leaderboard_bottom_1")],
@@ -65,7 +61,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_admin(user.id):
         keyboard.append([InlineKeyboardButton("⚙️ 管理面板", callback_data="admin_settings_menu")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
     if update.callback_query:
         await message.edit_text(start_message, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
     else:
@@ -73,14 +68,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'waiting_for' in context.user_data:
-        del context.user_data['waiting_for']
-        await update.message.reply_text("操作已取消。")
+        del context.user_data['waiting_for']; await update.message.reply_text("操作已取消。")
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    
     await get_or_create_user(user_id=query.from_user.id, username=query.from_user.username, first_name=query.from_user.first_name)
     
     simple_handlers = {
@@ -96,17 +89,16 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         "confirm_data_erasure": confirm_data_erasure, "cancel_data_erasure": cancel_data_erasure,
     }
     if data in simple_handlers:
-        await simple_handlers[data](update, context)
-        return
+        await simple_handlers[data](update, context); return
 
     patterns = {
         r"leaderboard_(top|bottom)_(\d+)": lambda m: leaderboard_menu(update, context, m[0], int(m[1])),
         r"leaderboard_refresh_(top|bottom)_(\d+)": lambda m: refresh_leaderboard(update, context, m[0], int(m[1])),
         r"my_favorites_(\d+)": lambda m: my_favorites_list(update, context, int(m[0])),
-        r"vote_(recommend|block)_(\d+)_(\d+)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2])),
-        r"process_vote_(\d+)_(.+)": lambda m: process_vote(update, context, int(m[0]), m[1]),
-        r"back_to_rep_card_(\d+)": lambda m: back_to_rep_card(update, context, int(m[0])),
-        r"rep_card_query_(\d+)": lambda m: send_reputation_card(update, context, int(m[0])),
+        r"vote_(recommend|block)_(\d+)_(\d+)_(.*)": lambda m: vote_menu(update, context, int(m[1]), m[0], int(m[2]), m[3]),
+        r"process_vote_(\d+)_(\d+)_(.*)": lambda m: process_vote(update, context, int(m[0]), int(m[1]), m[2]),
+        r"back_to_rep_card_(\d+)_(.*)": lambda m: back_to_rep_card(update, context, int(m[0]), m[1]),
+        r"rep_card_query_(\d+)_?(.*)": lambda m: send_reputation_card(update, context, int(m[0]), m[1]),
         r"add_favorite_(\d+)": lambda m: add_favorite(update, context, int(m[0])),
         r"remove_favorite_(\d+)": lambda m: remove_favorite(update, context, int(m[0])),
         r"stats_user_(\d+)(?:_(\d+))?": lambda m: user_stats_menu(update, context, int(m[0]), int(m[1] or 1)),
@@ -127,12 +119,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     logger.warning(f"未找到处理器，或正则表达式不匹配。回调数据: '{data}'")
 
 ptb_app = None
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ptb_app
     ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
     ptb_app.add_error_handler(error_handler)
     ptb_app.add_handler(CommandHandler("start", start_command))
     ptb_app.add_handler(CommandHandler("help", start_command))
@@ -143,39 +133,30 @@ async def lifespan(app: FastAPI):
     ptb_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, process_admin_input))
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
     ptb_app.add_handler(CallbackQueryHandler(button_callback_handler))
-
     await init_db()
     if RENDER_EXTERNAL_URL:
         await ptb_app.bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/webhook", allowed_updates=Update.ALL_TYPES)
         logger.info(f"Webhook已设置为: {RENDER_EXTERNAL_URL}/webhook")
-    
     await ptb_app.initialize()
     if ptb_app.post_init: await ptb_app.post_init(ptb_app)
-    
     yield
-    
     if ptb_app.post_shutdown: await ptb_app.post_shutdown(ptb_app)
     await ptb_app.shutdown()
     db_pool = await get_pool()
     if db_pool: await db_pool.close(); logger.info("数据库连接池已关闭。")
 
 fastapi_app = FastAPI(lifespan=lifespan)
-
 @fastapi_app.post("/webhook")
 async def webhook(request: Request):
     try:
-        data = await request.json()
-        update = Update.de_json(data, ptb_app.bot)
+        data = await request.json(); update = Update.de_json(data, ptb_app.bot)
         await ptb_app.process_update(update)
         return Response(status_code=200)
     except Exception as e:
         logger.error(f"处理webhook时出错: {e}", exc_info=True)
         return Response(status_code=500)
-
 @fastapi_app.get("/")
-def index():
-    return {"status": "ok", "bot": "神谕者机器人正在运行"}
-
+def index(): return {"status": "ok", "bot": "神谕者机器人正在运行"}
 if __name__ == "__main__":
     port = int(environ.get("PORT", 8000))
     uvicorn.run("main:fastapi_app", host="0.0.0.0", port=port, reload=False)
