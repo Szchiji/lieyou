@@ -5,9 +5,11 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 
 from database import get_or_create_user, get_or_create_target, db_fetch_all, db_fetch_one, db_execute
+from handlers.utils import membership_required # <-- 导入我们的检查器
 
 logger = logging.getLogger(__name__)
 
+@membership_required # <-- 贴上标签
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含@username和关键词的文本消息，处理任意字符串，不检查群成员。"""
     message = update.effective_message
@@ -20,7 +22,6 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = match.group(1).lower()
     
     try:
-        # --- 正确的逻辑：直接为 @username 字符串获取或创建目标 ---
         target_user = await get_or_create_target(username)
     except ValueError as e:
         logger.error(f"创建目标 @{username} 失败: {e}")
@@ -35,6 +36,7 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         vote_type = 'recommend' if has_recommend_keyword else 'block'
         await vote_menu(update, context, target_user['pkid'], vote_type, origin='query')
 
+@membership_required # <-- 贴上标签 (保护所有通过按钮触发的后续操作)
 async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str = 'query'):
     """发送一个目标的声誉卡片。"""
     message = update.effective_message or update.callback_query.message
@@ -98,7 +100,7 @@ async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-# (vote_menu, process_vote, back_to_rep_card 等函数与之前版本相同，为了完整性一并提供)
+@membership_required # <-- 贴上标签
 async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, vote_type: str, origin: str):
     message = update.effective_message or update.callback_query.message
     tags = await db_fetch_all("SELECT pkid, name FROM tags WHERE type = $1", vote_type)
@@ -111,6 +113,7 @@ async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_u
     if update.callback_query: await message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else: await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+@membership_required # <-- 贴上标签
 async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, tag_pkid: int, origin: str):
     query = update.callback_query
     try:
@@ -122,12 +125,18 @@ async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, targe
         await query.answer("🤔 你不能评价自己哦。", show_alert=True)
         return
     try:
-        await db_execute("INSERT INTO evaluations (user_pkid, target_user_pkid, tag_pkid, type) VALUES ($1, $2, $3, (SELECT type FROM tags WHERE pkid = $3)) ON CONFLICT (user_pkid, target_user_pkid, tag_pkid) DO UPDATE SET created_at = NOW();", from_user['pkid'], target_user_pkid, tag_pkid)
+        tag_type_record = await db_fetch_one("SELECT type FROM tags WHERE pkid = $1", tag_pkid)
+        if not tag_type_record:
+            await query.answer("❌ 标签不存在。", show_alert=True)
+            return
+
+        await db_execute("INSERT INTO evaluations (user_pkid, target_user_pkid, tag_pkid, type) VALUES ($1, $2, $3, $4) ON CONFLICT (user_pkid, target_user_pkid, tag_pkid) DO UPDATE SET created_at = NOW();", from_user['pkid'], target_user_pkid, tag_pkid, tag_type_record['type'])
         await query.answer("✅ 感谢您的评价！", show_alert=True)
     except Exception as e:
         logger.error(f"评价处理失败: {e}", exc_info=True)
         await query.answer("❌ 评价失败，发生内部错误。", show_alert=True)
     await send_reputation_card(update, context, target_user_pkid, origin)
 
+@membership_required # <-- 贴上标签
 async def back_to_rep_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str):
     await send_reputation_card(update, context, target_user_pkid, origin)
