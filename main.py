@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """The main entry point for the bot."""
-    # Load .env but DO NOT override existing system environment variables.
-    # This ensures variables from the Render UI are prioritized.
     load_dotenv(override=False)
     
     BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -43,19 +41,16 @@ async def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # --- Conversation Handlers ---
-    # For adding new tags
     add_tag_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$')],
         states={
             TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
-            # The following state was missing a handler, corrected it.
             SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_new_tag, pattern=r'^tag_type_')],
         },
         fallbacks=[CommandHandler('cancel', cancel_action)],
         conversation_timeout=300
     )
 
-    # For managing users (hide/unhide)
     user_manage_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(prompt_for_username, pattern=r'^admin_hide_user_prompt$'),
@@ -69,7 +64,6 @@ async def main():
         conversation_timeout=300
     )
 
-    # For sending broadcasts
     broadcast_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(prompt_for_broadcast, pattern=r'^admin_broadcast$')],
         states={
@@ -81,43 +75,27 @@ async def main():
     )
 
     # --- Register Handlers ---
-    
-    # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("myreport", generate_my_report))
-    
-    # Messages
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_menu_callback_handler))
     application.add_handler(MessageHandler(filters.Entity("mention") & filters.ChatType.GROUPS, handle_query))
-
-    # Callback Queries for Reputation and Tags (Corrected)
     application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_'))
     application.add_handler(CallbackQueryHandler(reputation.tag_callback_handler, pattern=r'^tag_'))
-
-    # Callback Queries for Leaderboards (Corrected)
     application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
     application.add_handler(CallbackQueryHandler(leaderboard.leaderboard_type_callback_handler, pattern=r'^lb_'))
-
-    # Callback Queries for Admin Panel Navigation
     application.add_handler(CallbackQueryHandler(admin_panel, pattern=r'^admin_panel$'))
     application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
-    
-    # Admin Features (Tags, Menu, Users)
     application.add_handler(CallbackQueryHandler(manage_tags_panel, pattern=r'^admin_manage_tags$'))
     application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_'))
-    
     application.add_handler(CallbackQueryHandler(manage_menu_buttons_panel, pattern=r'^admin_menu_buttons$'))
-    
     application.add_handler(CallbackQueryHandler(user_management_panel, pattern=r'^admin_user_management$'))
-
-    # Add Conversation Handlers
     application.add_handler(add_tag_conv)
     application.add_handler(user_manage_conv)
     application.add_handler(broadcast_conv)
 
-    # --- Start Background Tasks ---
-    monitor_task = asyncio.create_task(run_suspicion_monitor(application.bot))
+    # --- Start Background Tasks (Temporarily Disabled) ---
+    # monitor_task = asyncio.create_task(run_suspicion_monitor(application.bot))
 
     # --- Run the Bot ---
     try:
@@ -126,7 +104,8 @@ async def main():
     finally:
         # --- Clean Shutdown ---
         logger.info("Bot is shutting down. Cleaning up...")
-        monitor_task.cancel()
+        # Since the task was not created, we don't need to cancel it.
+        # monitor_task.cancel() 
         await database.close_pool()
         logger.info("Cleanup complete. Goodbye!")
 
