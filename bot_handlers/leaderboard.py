@@ -28,45 +28,34 @@ async def get_leaderboard_data(context: ContextTypes.DEFAULT_TYPE, leaderboard_t
     if leaderboard_type == 'recommend':
         query = """
             SELECT u.username, COUNT(e.pkid) as count
-            FROM evaluations e
-            JOIN users u ON e.target_user_pkid = u.pkid
+            FROM evaluations e JOIN users u ON e.target_user_pkid = u.pkid
             WHERE e.type = 'recommend'
-            GROUP BY u.username
-            HAVING COUNT(e.pkid) > 0
-            ORDER BY count DESC, u.username
-            LIMIT 50;
+            GROUP BY u.username HAVING COUNT(e.pkid) > 0
+            ORDER BY count DESC, u.username LIMIT 50;
         """
     elif leaderboard_type == 'block':
         query = """
             SELECT u.username, COUNT(e.pkid) as count
-            FROM evaluations e
-            JOIN users u ON e.target_user_pkid = u.pkid
+            FROM evaluations e JOIN users u ON e.target_user_pkid = u.pkid
             WHERE e.type = 'block'
-            GROUP BY u.username
-            HAVING COUNT(e.pkid) > 0
-            ORDER BY count DESC, u.username
-            LIMIT 50;
+            GROUP BY u.username HAVING COUNT(e.pkid) > 0
+            ORDER BY count DESC, u.username LIMIT 50;
         """
     elif leaderboard_type == 'score':
         query = """
             SELECT u.username, 
                    (COUNT(CASE WHEN e.type = 'recommend' THEN 1 END) - COUNT(CASE WHEN e.type = 'block' THEN 1 END)) as score
-            FROM evaluations e
-            JOIN users u ON e.target_user_pkid = u.pkid
+            FROM evaluations e JOIN users u ON e.target_user_pkid = u.pkid
             GROUP BY u.username
             HAVING (COUNT(CASE WHEN e.type = 'recommend' THEN 1 END) - COUNT(CASE WHEN e.type = 'block' THEN 1 END)) != 0
-            ORDER BY score DESC, u.username
-            LIMIT 50;
+            ORDER BY score DESC, u.username LIMIT 50;
         """
     elif leaderboard_type == 'popularity':
         query = """
             SELECT u.username, COUNT(f.pkid) as count
-            FROM favorites f
-            JOIN users u ON f.target_user_pkid = u.pkid
-            GROUP BY u.username
-            HAVING COUNT(f.pkid) > 0
-            ORDER BY count DESC, u.username
-            LIMIT 50;
+            FROM favorites f JOIN users u ON f.target_user_pkid = u.pkid
+            GROUP BY u.username HAVING COUNT(f.pkid) > 0
+            ORDER BY count DESC, u.username LIMIT 50;
         """
     else:
         return []
@@ -77,12 +66,29 @@ async def get_leaderboard_data(context: ContextTypes.DEFAULT_TYPE, leaderboard_t
 
 @membership_required
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """响应 /bang 命令，显示排行榜主菜单。"""
+    """
+    响应 /bang 命令。
+    - 在群组中，引导用户到私聊。
+    - 在私聊中，直接显示排行榜菜单。
+    """
+    # 如果命令来自于群组或超级群组
+    if update.message and update.message.chat.type in ['group', 'supergroup']:
+        bot_username = context.bot.username
+        private_chat_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👉 前往私聊查看排行榜", url=f"https://t.me/{bot_username}?start=bang")]
+        ])
+        await update.message.reply_text(
+            "为保持群内整洁，排行榜功能请在私聊窗口查看。",
+            reply_markup=private_chat_button
+        )
+        return
+    
+    # 如果是私聊（或通过 deep-linking 启动），直接显示排行榜菜单
     await show_leaderboard_menu(update, context)
 
 @membership_required
 async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示排行榜类型的选择菜单。"""
+    """显示排行榜类型的选择菜单 (此函数现在只应在私聊中被调用)。"""
     text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
     keyboard = [
         [
@@ -129,7 +135,6 @@ async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYP
     rank_start = offset + 1
     
     for i, row in enumerate(page_data):
-        # Escape markdown characters in username
         username = row['username'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
         value = row.get('count') or row.get('score')
         text += f"`{rank_start + i:2d}\\.` @{username} \\- **{value}**\n"
