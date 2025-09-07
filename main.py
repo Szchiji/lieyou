@@ -15,10 +15,8 @@ from telegram.ext import (
 
 import database
 from bot_handlers import *
-# Import the submodules directly to resolve NameError
 from bot_handlers import reputation, leaderboard 
 
-# --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,7 +24,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def main():
-    """The main entry point for the bot."""
     load_dotenv(override=False)
     
     BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,13 +31,9 @@ async def main():
         logger.critical("BOT_TOKEN not found in environment variables. Bot cannot start.")
         return
 
-    # Initialize database
     await database.init_db()
-
-    # Build the application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # --- Conversation Handlers ---
     add_tag_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$')],
         states={
@@ -74,7 +67,6 @@ async def main():
         conversation_timeout=600
     )
 
-    # --- Register Handlers ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_panel))
     application.add_handler(CommandHandler("myreport", generate_my_report))
@@ -97,14 +89,11 @@ async def main():
     # --- Start Background Tasks (Temporarily Disabled) ---
     # monitor_task = asyncio.create_task(run_suspicion_monitor(application.bot))
 
-    # --- Run the Bot ---
     try:
         logger.info("Bot is starting polling...")
         await application.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
-        # --- Clean Shutdown ---
         logger.info("Bot is shutting down. Cleaning up...")
-        # Since the task was not created, we don't need to cancel it.
         # monitor_task.cancel() 
         await database.close_pool()
         logger.info("Cleanup complete. Goodbye!")
