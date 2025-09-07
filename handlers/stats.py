@@ -3,6 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from database import get_or_create_user, is_admin
+from handlers.utils import membership_required # <-- 导入我们的检查器
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ async def get_main_menu(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     
     return text, InlineKeyboardMarkup(keyboard_buttons)
 
+@membership_required # <-- 贴上标签
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理 /start 命令，欢迎用户并显示主菜单。"""
     user = update.effective_user
@@ -47,6 +49,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text, reply_markup = await get_main_menu(user.id)
     await update.message.reply_text(text, reply_markup=reply_markup)
 
+@membership_required # <-- 贴上标签
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理 /help 命令和 'help' 回调，显示主菜单。"""
     user = update.effective_user
@@ -57,6 +60,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
+@membership_required # <-- 贴上标签
 async def back_to_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """作为回调处理函数，返回主菜单。"""
     await help_command(update, context)
