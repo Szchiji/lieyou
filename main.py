@@ -5,6 +5,8 @@ from functools import wraps
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import uvicorn
+from fastapi import FastAPI
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -20,20 +22,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- 伪装网站，用于应付 Render 的端口检查 ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
+# 使用 FastAPI，一个现代的异步 web 框架，能更好地与 PTB 的 asyncio 集成
+web_app = FastAPI()
 
-def run_health_check_server():
-    # Render 会自动注入 PORT 环境变量，通常是 10000
-    port = int(os.environ.get("PORT", 10000))
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    logger.info(f"正在端口 {port} 上启动健康检查服务器...")
-    httpd.serve_forever()
+@web_app.get("/")
+async def health_check():
+    return {"status": "Bot is running"}
 
 # --- 权限装饰器 (完整) ---
 def admin_required(func):
@@ -186,16 +180,13 @@ async def admin_toggle_menu_status(update: Update, context: ContextTypes.DEFAULT
     await db_execute("UPDATE menu_buttons SET is_enabled = $1 WHERE id = $2", not current_status, button_id); await admin_manage_menu(update, context)
 async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.answer()
 
-# --- 主程序入口 (最终进化版) ---
-async def post_init(app: Application):
-    await database.init_db()
-    logger.info("数据库初始化完成。")
-
-async def main_async():
+# --- 主程序入口 (最终修正版) ---
+async def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token: raise ValueError("请设置 TELEGRAM_TOKEN 环境变量")
 
-    application = ApplicationBuilder().token(token).post_init(post_init).build()
+    # 配置机器人
+    application = ApplicationBuilder().token(token).build()
 
     # 添加所有处理器...
     application.add_handler(CommandHandler("start", start_command))
@@ -218,14 +209,36 @@ async def main_async():
     application.add_handler(CallbackQueryHandler(show_favorites, pattern=r'^show_favorites:'))
     application.add_handler(CallbackQueryHandler(toggle_favorite, pattern=r'^toggle_favorite:'))
     application.add_handler(CallbackQueryHandler(remove_favorite_from_list, pattern=r'^remove_favorite:'))
-    
-    logger.info("机器人正在启动 polling...")
-    await application.run_polling(drop_pending_updates=True)
+
+    # 使用 asyncio.gather 来同时运行机器人和 web 服务器
+    async with application:
+        logger.info("正在初始化数据库...")
+        await database.init_db()
+        logger.info("数据库初始化完成。")
+
+        logger.info("正在启动机器人 polling...")
+        await application.start()
+        await application.updater.start_polling()
+
+        # 启动 web 服务器
+        port = int(os.environ.get("PORT", 10000))
+        config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="info")
+        server = uvicorn.Server(config)
+        
+        logger.info(f"正在端口 {port} 上启动健康检查服务器...")
+        await server.serve()
+
+        # 当服务器停止时（例如，Render重启进程），优雅地关闭机器人
+        logger.info("正在关闭机器人...")
+        await application.updater.stop()
+        await application.stop()
 
 if __name__ == '__main__':
-    # 启动健康检查服务器在一个单独的线程中
-    health_thread = threading.Thread(target=run_health_check_server, daemon=True)
-    health_thread.start()
-
-    # 在主线程中运行异步的机器人
-    asyncio.run(main_async())
+    # 为了让这个新结构生效，我们需要安装两个新的库
+    # 在你的 requirements.txt 文件中加入:
+    # fastapi
+    # uvicorn
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("机器人被手动关闭。")
