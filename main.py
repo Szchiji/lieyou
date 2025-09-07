@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import re
 from datetime import datetime
 from dotenv import load_dotenv
@@ -16,13 +17,20 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import asyncio
 
+# --- 强制修正 Python 路径 ---
+# 这段代码将确保 Python 解释器能够找到我们所有的模块
+# 无论它在什么环境下运行。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ---------------------------
+
 # 在所有其他导入之前加载环境变量
 load_dotenv()
 
 # 导入数据库初始化函数
 from database import init_db
 
-# --- 导入处理程序模块 (最终修正) ---
+# --- 导入处理程序模块 ---
+# 我们使用最明确的导入方式
 import handlers.start
 import handlers.admin
 import handlers.favorites
@@ -65,7 +73,7 @@ async def main() -> None:
 
     application = Application.builder().token(telegram_token).build()
 
-    # --- 注册处理程序 (最终修正) ---
+    # --- 注册处理程序 ---
     application.add_handler(CommandHandler("start", handlers.start.start))
     application.add_handler(CommandHandler("help", handlers.start.help_command))
     application.add_handler(CommandHandler("admin", handlers.admin.admin_panel))
