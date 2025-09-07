@@ -11,40 +11,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Connection Pool ---
-pool = None
+_pool = None
 
 async def get_pool():
-    """Returns the existing database connection pool or creates a new one."""
-    global pool
-    if pool is None:
-        load_dotenv()
+    """
+    Returns the existing database connection pool or creates a new one
+    using the DATABASE_URL environment variable.
+    """
+    global _pool
+    if _pool is None:
+        # Load environment variables, but do not override existing system variables.
+        # This ensures that variables set in the Render UI take precedence.
+        load_dotenv(override=False)
+        
+        DATABASE_URL = os.getenv("DATABASE_URL")
+        if not DATABASE_URL:
+            logger.critical("DATABASE_URL not found in environment variables. Cannot connect to the database.")
+            raise ValueError("DATABASE_URL is not set.")
+
         try:
-            pool = await asyncpg.create_pool(
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASSWORD"),
-                database=os.getenv("DB_NAME"),
-                host=os.getenv("DB_HOST"),
-                port=os.getenv("DB_PORT")
+            # Use the DSN (Data Source Name) which is the DATABASE_URL.
+            _pool = await asyncpg.create_pool(
+                dsn=DATABASE_URL,
+                min_size=1,
+                max_size=10,
+                max_queries=50,
+                max_inactive_connection_lifetime=300
             )
             logger.info("Database connection pool created successfully.")
         except Exception as e:
-            logger.critical(f"Failed to create database connection pool: {e}")
+            logger.critical(f"Failed to create database connection pool: {e}", exc_info=True)
             raise
-    return pool
+    return _pool
 
 async def close_pool():
     """Closes the database connection pool."""
-    global pool
-    if pool:
-        await pool.close()
-        pool = None
+    global _pool
+    if _pool:
+        await _pool.close()
+        _pool = None
         logger.info("Database connection pool closed.")
 
 # --- Database Initialization ---
 async def init_db():
     """
     Initializes the database: creates tables and adds necessary columns/indexes if they don't exist.
-    This is the upgraded version for performance and new features.
     """
     db_pool = await get_pool()
     async with db_pool.acquire() as connection:
@@ -61,16 +72,8 @@ async def init_db():
                 is_hidden BOOLEAN NOT NULL DEFAULT FALSE
             );
         """)
-
         # Add is_hidden column to existing table if missing
-        await connection.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_hidden') THEN
-                    ALTER TABLE users ADD COLUMN is_hidden BOOLEAN NOT NULL DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
+        await connection.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN NOT NULL DEFAULT FALSE;")
 
         # Tags Table
         await connection.execute("""
@@ -93,16 +96,8 @@ async def init_db():
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
-        
         # Add created_at column to existing table if missing
-        await connection.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='evaluations' AND column_name='created_at') THEN
-                    ALTER TABLE evaluations ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-                END IF;
-            END $$;
-        """)
+        await connection.execute("ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
 
         # Favorites Table
         await connection.execute("""
@@ -163,28 +158,33 @@ async def db_execute(query, *params):
         return await connection.execute(query, *params)
 
 # --- User specific functions ---
-async def get_user(user_id: int):
-    """Gets a user by their Telegram ID."""
-    return await db_fetch_one("SELECT * FROM users WHERE id = $1", user_id)
-
-async def save_user(user: dict):
-    """Saves or updates a user in the database."""
-    user_id = user.id
-    username = user.username
-    first_name = user.first_name
-    admin_user_id = os.getenv("ADMIN_USER_ID")
-
-    is_admin = str(user_id) == str(admin_user_id)
-
-    existing_user = await get_user(user_id)
-    if existing_user:
+async def get_or_create_user(user_data: dict) -> int:
+    """Gets a user by their Telegram ID, creating them if they don't exist."""
+    user_id = user_data.id
+    username = user_data.username
+    first_name = user_data.first_name
+    
+    # Check if user exists
+    user_pkid = await db_fetch_val("SELECT pkid FROM users WHERE id = $1", user_id)
+    
+    if user_pkid:
+        # Update user info if they exist
         await db_execute(
-            "UPDATE users SET username = $1, first_name = $2, is_admin = $3 WHERE id = $4",
-            username, first_name, is_admin, user_id
+            "UPDATE users SET username = $1, first_name = $2 WHERE id = $3",
+            username, first_name, user_id
         )
-        return existing_user['pkid']
+        return user_pkid
     else:
+        # Create user if they don't exist
+        # Check if this user should be an admin
+        admin_user_ids = os.getenv("ADMIN_USER_IDS", "").split(',')
+        is_admin = str(user_id) in admin_user_ids
+
         return await db_fetch_val(
             "INSERT INTO users (id, username, first_name, is_admin) VALUES ($1, $2, $3, $4) RETURNING pkid",
             user_id, username, first_name, is_admin
         )
+
+# Note: The original `save_user` function was replaced by a more robust `get_or_create_user`.
+# The logic in `save_user` had some issues with how it handled admin status on updates.
+# This new function is safer and more aligned with the bot's likely needs.
