@@ -1,154 +1,179 @@
 import logging
-import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import math
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
-
-from database import get_or_create_user, get_or_create_target, db_fetch_all, db_fetch_one, db_execute, db_fetch_val
-from .utils import membership_required
-from . import statistics as statistics_handlers
+import database
 
 logger = logging.getLogger(__name__)
+DECAY_LAMBDA = 0.0038  # Half-life of ~6 months
 
-async def send_reputation_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_record: dict, text_prefix: str = ""):
-    """发送一个用户的声誉卡片，包含评价和统计信息。"""
-    target_pkid = target_user_record['pkid']
-    target_username = target_user_record['username']
+async def get_reputation_stats(target_user_pkid: int):
+    """Fetches reputation stats for a user with time decay."""
+    query = f"""
+        WITH weighted_evals AS (
+            SELECT
+                type,
+                exp(-{DECAY_LAMBDA} * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0) as weight
+            FROM evaluations
+            WHERE target_user_pkid = $1
+        )
+        SELECT
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend') as total_recommends,
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'warn') as total_warns,
+            COALESCE(SUM(CASE WHEN type = 'recommend' THEN weight ELSE 0 END), 0) as weighted_recommends,
+            COALESCE(SUM(CASE WHEN type = 'warn' THEN weight ELSE 0 END), 0) as weighted_warns
+        FROM weighted_evals
+    """
     
-    # 获取统计数据
-    recommends = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend'", target_pkid)
-    blocks = await db_fetch_val("SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'block'", target_pkid)
-    favorited_by = await db_fetch_val("SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1", target_pkid)
-    score = recommends - blocks
+    stats = await database.db_fetch_one(query, target_user_pkid)
+    
+    if not stats or stats['total_recommends'] is None:
+        return {"recommend_count": 0, "warn_count": 0, "reputation_score": 0, "favorites_count": 0}
 
-    # 构建文本
-    text = f"{text_prefix}声誉卡片: @{target_username}\n\n"
-    text += f"👍 **推荐**: {recommends} 次\n"
-    text += f"👎 **警告**: {blocks} 次\n"
-    text += f"❤️ **收藏**: 被 {favorited_by} 人收藏\n"
-    text += f"✨ **声望**: {score}\n"
+    reputation_score = stats['weighted_recommends'] - stats['weighted_warns']
+    
+    favorites_count = await database.db_fetch_val(
+        "SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1", target_user_pkid
+    )
 
-    # 构建按钮
+    return {
+        "recommend_count": stats['total_recommends'],
+        "warn_count": stats['total_warns'],
+        "reputation_score": math.ceil(reputation_score * 10),
+        "favorites_count": favorites_count or 0
+    }
+
+async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles @username queries."""
+    message_text = update.message.text
+    # Find all @mentions
+    entities = [e for e in update.message.entities if e.type == 'mention']
+    if not entities:
+        return
+
+    # Process only the first mention
+    entity = entities[0]
+    target_username = message_text[entity.offset + 1 : entity.offset + entity.length]
+    
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
+
+    target_user_record = await database.db_fetch_one(
+        "SELECT pkid, is_hidden FROM users WHERE username = $1", target_username
+    )
+
+    if not target_user_record or target_user_record['is_hidden']:
+        await update.message.reply_text(f"找不到用户 @{target_username} 或该用户已被管理员隐藏。")
+        return
+        
+    target_user_pkid = target_user_record['pkid']
+
+    stats = await get_reputation_stats(target_user_pkid)
+    
+    is_favorited = await database.db_fetch_val(
+        "SELECT 1 FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+        evaluator_pkid, target_user_pkid
+    )
+
+    text = (
+        f"👤 **@{target_username} 的声誉档案**\n\n"
+        f"👍 **推荐**: {stats['recommend_count']} 次\n"
+        f"👎 **警告**: {stats['warn_count']} 次\n"
+        f"❤️ **收藏人气**: {stats['favorites_count']}\n"
+        f"🔥 **综合声望**: {stats['reputation_score']}"
+    )
+    
     keyboard = [
         [
-            InlineKeyboardButton(f"👍 推荐 ({recommends})", callback_data=f"vote_recommend_{target_pkid}_{target_username}"),
-            InlineKeyboardButton(f"👎 警告 ({blocks})", callback_data=f"vote_block_{target_pkid}_{target_username}")
+            InlineKeyboardButton("👍 推荐", callback_data=f"rep_rec_{target_user_pkid}"),
+            InlineKeyboardButton("👎 警告", callback_data=f"rep_warn_{target_user_pkid}"),
         ],
         [
-            InlineKeyboardButton("❤️ 加入收藏", callback_data=f"add_favorite_{target_pkid}_{target_username}"),
-            InlineKeyboardButton("📊 查看统计", callback_data=f"stats_user_{target_pkid}_0_{target_username}")
+            InlineKeyboardButton("💔 取消收藏" if is_favorited else "❤️ 收藏", callback_data=f"rep_fav_{target_user_pkid}"),
+            InlineKeyboardButton("📊 详细统计", callback_data=f"rep_stats_{target_user_pkid}"),
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup)
-
-@membership_required
-async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理包含@username的文本消息。"""
-    message_text = update.message.text
-    # 匹配 @username 和可选的评价词
-    match = re.search(r'@(\w+)\s*(推荐|警告)?', message_text)
-    if not match:
-        return
-
-    target_username = match.group(1).lower()
-    action = match.group(2)
     
-    user = update.effective_user
-    
-    try:
-        user_record = await get_or_create_user(user)
-        target_user_record = await get_or_create_target(target_username)
-    except ValueError as e:
-        await update.message.reply_text(f"❌ 操作失败: {e}")
-        return
-    except Exception as e:
-        logger.error(f"处理声誉查询时数据库出错: {e}")
-        await update.message.reply_text("❌ 数据库错误，请稍后再试。")
-        return
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    if not action:
-        # 如果没有指定动作，只显示声誉卡片
-        await send_reputation_card(update, context, target_user_record)
-    else:
-        # 如果指定了动作，直接弹出标签选择菜单
-        vote_type = 'recommend' if action == '推荐' else 'block'
-        await vote_menu(update, context, target_user_record['pkid'], vote_type, target_user_record['username'])
-
-
-async def vote_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, target_pkid: int, vote_type: str, target_username: str):
-    """显示用于评价的标签列表。"""
-    tags = await db_fetch_all("SELECT pkid, name FROM tags WHERE type = $1 ORDER BY name", vote_type)
-    
-    action_text = "推荐" if vote_type == 'recommend' else "警告"
-    text = f"你正在为 @{target_username} 添加“{action_text}”评价。\n请选择一个标签："
-
-    keyboard = []
-    row = []
-    for tag in tags:
-        row.append(InlineKeyboardButton(tag['name'], callback_data=f"process_vote_{target_pkid}_{tag['pkid']}_{target_username}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("🔙 返回声誉卡片", callback_data=f"back_to_rep_card_{target_pkid}_{target_username}")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
-    else:
-        # From handle_query directly
-        await update.message.reply_text(text, reply_markup=reply_markup)
-
-
-async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE, target_pkid: int, tag_pkid: int, target_username: str):
-    """处理用户的评价投票。"""
+async def reputation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all callbacks starting with 'rep_'."""
     query = update.callback_query
-    user = query.from_user
-
-    try:
-        user_record = await get_or_create_user(user)
-    except ValueError as e:
-        await query.answer(f"❌ 操作失败: {e}", show_alert=True)
-        return
-        
-    tag_info = await db_fetch_one("SELECT name, type FROM tags WHERE pkid = $1", tag_pkid)
-    if not tag_info:
-        await query.answer("❌ 标签不存在！", show_alert=True)
-        return
-        
-    vote_type = tag_info['type']
+    await query.answer()
     
-    try:
-        # 使用 ON CONFLICT 来处理重复投票，实现 "覆盖" 逻辑
-        await db_execute(
-            """
-            INSERT INTO evaluations (user_pkid, target_user_pkid, tag_pkid, type)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_pkid, target_user_pkid, tag_pkid) DO NOTHING;
-            """,
-            user_record['pkid'], target_pkid, tag_pkid, vote_type
-        )
-        action_text = "推荐" if vote_type == 'recommend' else "警告"
-        await query.answer(f"✅ 已为 @{target_username} 添加“{tag_info['name']}”{action_text}评价！", show_alert=True)
+    parts = query.data.split('_')
+    action = parts[1]
+    target_user_pkid = int(parts[2])
 
-    except Exception as e:
-        logger.error(f"处理投票时数据库出错: {e}")
-        await query.answer("❌ 数据库错误，请稍后再试。", show_alert=True)
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
+
+    if action in ['rec', 'warn']:
+        tag_type = 'recommend' if action == 'rec' else 'warn'
+        tags = await database.db_fetch_all("SELECT pkid, name FROM tags WHERE type = $1 AND is_active = TRUE", tag_type)
+        if not tags:
+            await query.edit_message_text(f"暂无可用标签，请联系管理员添加。")
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton(tag['name'], callback_data=f"tag_{tag['pkid']}_{target_user_pkid}")]
+            for tag in tags
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 取消", callback_data=f"rep_cancel_{target_user_pkid}")])
+        action_text = "推荐" if tag_type == 'recommend' else "警告"
+        await query.edit_message_text(f"请为您的“{action_text}”选择一个标签：", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif action == 'fav':
+        is_favorited = await database.db_fetch_val(
+            "SELECT 1 FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+            evaluator_pkid, target_user_pkid
+        )
+        if is_favorited:
+            await database.db_execute(
+                "DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+                evaluator_pkid, target_user_pkid
+            )
+            await query.answer("💔 已取消收藏")
+        else:
+            await database.db_execute(
+                "INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                evaluator_pkid, target_user_pkid
+            )
+            await query.answer("❤️ 已收藏！")
+        # Note: We don't update the original message to avoid race conditions in groups.
+        # The change will be reflected the next time the user is queried.
+
+async def tag_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles tag selection for an evaluation."""
+    query = update.callback_query
+    
+    parts = query.data.split('_')
+    tag_pkid = int(parts[1])
+    target_user_pkid = int(parts[2])
+    
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
+
+    tag_info = await database.db_fetch_one("SELECT type FROM tags WHERE pkid = $1", tag_pkid)
+    if not tag_info:
+        await query.answer("标签不存在或已失效。")
         return
 
-    # 刷新声誉卡片
-    target_user_record = {"pkid": target_pkid, "username": target_username}
-    await send_reputation_card(update, context, target_user_record)
-
-
-async def back_to_rep_card(update: Update, context: ContextTypes.DEFAULT_TYPE, target_pkid: int, target_username: str):
-    """回调函数，用于从其他菜单返回声誉卡片。"""
-    target_user_record = {"pkid": target_pkid, "username": target_username}
-    await send_reputation_card(update, context, target_user_record)
+    # Prevent self-evaluation
+    if evaluator_pkid == target_user_pkid:
+        await query.answer("您不能评价自己。", show_alert=True)
+        # Restore original message if possible, or just send a text
+        await query.edit_message_text("操作失败：您不能评价自己。")
+        return
+        
+    await database.db_execute(
+        """
+        INSERT INTO evaluations (evaluator_user_pkid, target_user_pkid, tag_pkid, type)
+        VALUES ($1, $2, $3, $4)
+        """,
+        evaluator_pkid, target_user_pkid, tag_pkid, tag_info['type']
+    )
+    
+    target_username = await database.db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_user_pkid)
+    
+    await query.edit_message_text(f"✅ 感谢您的评价！您已成功评价 @{target_username}。")
