@@ -15,6 +15,8 @@ from telegram.ext import (
 
 import database
 from bot_handlers import *
+# Import the submodules directly to resolve NameError
+from bot_handlers import reputation, leaderboard 
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -25,10 +27,13 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """The main entry point for the bot."""
-    load_dotenv()
+    # Load .env but DO NOT override existing system environment variables.
+    # This ensures variables from the Render UI are prioritized.
+    load_dotenv(override=False)
+    
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN not found in .env file. Bot cannot start.")
+        logger.critical("BOT_TOKEN not found in environment variables. Bot cannot start.")
         return
 
     # Initialize database
@@ -38,16 +43,16 @@ async def main():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # --- Conversation Handlers ---
-    # These need to be defined before they are added to the application
-    
     # For adding new tags
     add_tag_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$')],
         states={
             TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
-            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern=r'^tag_type_')],
+            # The following state was missing a handler, corrected it.
+            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_new_tag, pattern=r'^tag_type_')],
         },
         fallbacks=[CommandHandler('cancel', cancel_action)],
+        conversation_timeout=300
     )
 
     # For managing users (hide/unhide)
@@ -61,6 +66,7 @@ async def main():
             TYPING_USERNAME_TO_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
         },
         fallbacks=[CommandHandler('cancel', cancel_action)],
+        conversation_timeout=300
     )
 
     # For sending broadcasts
@@ -71,6 +77,7 @@ async def main():
             CONFIRM_BROADCAST: [CallbackQueryHandler(confirm_broadcast, pattern=r'^broadcast_')],
         },
         fallbacks=[CommandHandler('cancel', cancel_action)],
+        conversation_timeout=600
     )
 
     # --- Register Handlers ---
@@ -84,11 +91,11 @@ async def main():
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_menu_callback_handler))
     application.add_handler(MessageHandler(filters.Entity("mention") & filters.ChatType.GROUPS, handle_query))
 
-    # Callback Queries for Reputation and Tags
+    # Callback Queries for Reputation and Tags (Corrected)
     application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_'))
-    application.add_handler(CallbackQueryHandler(reputation.tag_callback_handler, pattern=r'^tag_')) # Import from reputation module
+    application.add_handler(CallbackQueryHandler(reputation.tag_callback_handler, pattern=r'^tag_'))
 
-    # Callback Queries for Leaderboards
+    # Callback Queries for Leaderboards (Corrected)
     application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
     application.add_handler(CallbackQueryHandler(leaderboard.leaderboard_type_callback_handler, pattern=r'^lb_'))
 
@@ -99,7 +106,6 @@ async def main():
     # Admin Features (Tags, Menu, Users)
     application.add_handler(CallbackQueryHandler(manage_tags_panel, pattern=r'^admin_manage_tags$'))
     application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_'))
-    # application.add_handler(CallbackQueryHandler(toggle_tag_callback, pattern=r'^admin_toggle_tag_')) # Add if implemented
     
     application.add_handler(CallbackQueryHandler(manage_menu_buttons_panel, pattern=r'^admin_menu_buttons$'))
     
