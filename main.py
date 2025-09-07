@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -76,9 +77,9 @@ async def main() -> None:
         filters.TEXT & ~filters.COMMAND & (filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP),
         reputation.handle_query
     ))
-    # 在私聊中处理管理员添加/标签添加的文本输入
+    # 在私聊中处理管理员添加/标签添加/入群设置的文本和转发输入
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        (filters.TEXT | filters.FORWARDED) & ~filters.COMMAND & filters.ChatType.PRIVATE,
         admin.handle_private_message
     ))
 
@@ -109,7 +110,7 @@ async def main() -> None:
     # 管理员
     application.add_handler(CallbackQueryHandler(admin.admin_panel, pattern=r"^admin_panel$"))
     application.add_handler(CallbackQueryHandler(admin.add_admin, pattern=r"^admin_add$"))
-    application.add_handler(CallbackQueryHandler(admin.remove_admin_menu, pattern=r"^admin_remove_menu_(\d+)$"))
+    application.add_handler(CallbackQueryHandler(lambda u, c: admin.remove_admin_menu(u, c, int(c.match.group(1))), pattern=r"^admin_remove_menu_(\d+)$"))
     application.add_handler(CallbackQueryHandler(lambda u, c: admin.confirm_remove_admin(u, c, int(c.match.group(1))), pattern=r"^admin_remove_confirm_(\d+)$"))
     application.add_handler(CallbackQueryHandler(admin.manage_tags, pattern=r"^admin_tags$"))
     application.add_handler(CallbackQueryHandler(lambda u, c: admin.add_tag(u, c, c.match.group(1)), pattern=r"^admin_add_tag_(\w+)$"))
@@ -117,6 +118,11 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(lambda u, c: admin.confirm_remove_tag(u, c, int(c.match.group(1))), pattern=r"^admin_remove_tag_confirm_(\d+)$"))
     application.add_handler(CallbackQueryHandler(admin.leaderboard_panel, pattern=r"^admin_leaderboard$"))
     application.add_handler(CallbackQueryHandler(leaderboard.clear_leaderboard_cache, pattern=r"^admin_clear_lb_cache$"))
+    
+    # --- 新增的管理员回调：入群设置 ---
+    application.add_handler(CallbackQueryHandler(admin.membership_settings, pattern=r"^admin_membership$"))
+    application.add_handler(CallbackQueryHandler(admin.set_invite_link, pattern=r"^admin_set_link$"))
+    application.add_handler(CallbackQueryHandler(admin.clear_membership_settings, pattern=r"^admin_clear_membership$"))
 
     # 注册错误处理
     application.add_error_handler(error_handler)
@@ -125,17 +131,31 @@ async def main() -> None:
     if render_url:
         # 使用 Webhook 模式 (适用于 Render 等平台)
         port = int(os.environ.get("PORT", 8443))
+        # 我们需要一个简单的web server来响应Render的健康检查
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import threading
+
+        class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'Bot is running')
+
+        httpd = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+        
+        # 在单独的线程中运行HTTP服务器
+        http_thread = threading.Thread(target=httpd.serve_forever)
+        http_thread.daemon = True
+        http_thread.start()
+        logger.info(f"健康检查服务器正在 0.0.0.0:{port} 上运行")
+
+        # 设置并运行Telegram应用
         await application.bot.set_webhook(url=f"{render_url}/telegram")
         logger.info(f"Webhook 已设置为 {render_url}/telegram")
-        # aiohttp web server
-        from aiohttp import web
-        web_app = web.Application()
-        web_app.add_routes([web.post("/telegram", lambda r: application.update_queue.put(Update.de_json(r.json(), application.bot)))])
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        logger.info(f"Web server 正在 0.0.0.0:{port} 上运行")
+        async with application:
+             await application.start()
+             logger.info("应用程序已启动 (Webhook模式)")
+             await application.running
     else:
         # 使用轮询模式 (适用于本地开发)
         logger.info("未检测到 RENDER_EXTERNAL_URL，将使用轮询模式启动。")
