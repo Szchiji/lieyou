@@ -15,15 +15,21 @@ pool: asyncpg.Pool | None = None
 async def init_db():
     """
     初始化数据库连接池并创建表（如果不存在）。
-    此版本专门为 Neon.tech 数据库优化。
+    此版本专门为 Neon.tech 数据库优化，已移除一次性爆破代码。
     """
     global pool
     
-    # 如果连接池已存在且未关闭，先关闭它，确保我们总是用新配置创建
+    # 如果连接池已经存在且健康，则直接返回
     if pool is not None and not pool.is_closing():
-        logger.warning("检测到已存在的连接池，将强制关闭以应用新配置。")
-        await pool.close()
-        pool = None
+        try:
+            async with pool.acquire() as connection:
+                await connection.fetchval("SELECT 1")
+            logger.info("数据库连接池已存在且健康，跳过初始化。")
+            return
+        except Exception as e:
+            logger.warning(f"检测到数据库连接池不健康: {e}。将强制关闭并重建。")
+            await pool.close()
+            pool = None
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -32,8 +38,8 @@ async def init_db():
 
     try:
         # --- 针对 Neon.tech 的关键优化 ---
-        # 1. statement_cache_size=0 禁用预编译指令缓存，避免 schema a变化导致的问题
-        # 2. command_timeout 设置一个命令超时，避免因 Neon 休眠唤醒导致长时间卡顿
+        # 1. statement_cache_size=0 禁用预编译指令缓存
+        # 2. command_timeout 设置一个命令超时
         logger.info("正在为 Neon.tech 创建新的数据库连接池...")
         pool = await asyncpg.create_pool(
             dsn=database_url, 
@@ -44,16 +50,6 @@ async def init_db():
         
         async with pool.acquire() as connection:
             logger.info("正在检查并创建数据表...")
-            # 为了绝对保险，我们先删除所有表，再重建
-            logger.warning("!!! 正在执行一次性爆破操作以确保数据库结构最新 !!!")
-            await connection.execute("DROP TABLE IF EXISTS evaluations CASCADE;")
-            await connection.execute("DROP TABLE IF EXISTS favorites CASCADE;")
-            await connection.execute("DROP TABLE IF EXISTS admins CASCADE;")
-            await connection.execute("DROP TABLE IF EXISTS users CASCADE;")
-            await connection.execute("DROP TABLE IF EXISTS tags CASCADE;")
-            await connection.execute("DROP TABLE IF EXISTS settings CASCADE;")
-            logger.warning("!!! 爆破操作完成。")
-
             # 创建 users 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -65,7 +61,7 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
-            # ... (其他 CREATE TABLE 语句保持不变) ...
+            # 创建 admins 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS admins (
                     pkid SERIAL PRIMARY KEY,
@@ -74,6 +70,7 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
+            # 创建 tags 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS tags (
                     pkid SERIAL PRIMARY KEY,
@@ -83,6 +80,7 @@ async def init_db():
                     UNIQUE(name, type)
                 );
             """)
+            # 创建 evaluations 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS evaluations (
                     pkid SERIAL PRIMARY KEY,
@@ -94,6 +92,7 @@ async def init_db():
                     UNIQUE(user_pkid, target_user_pkid, tag_pkid)
                 );
             """)
+            # 创建 favorites 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS favorites (
                     pkid SERIAL PRIMARY KEY,
@@ -103,6 +102,7 @@ async def init_db():
                     UNIQUE(user_pkid, target_user_pkid)
                 );
             """)
+            # 创建 settings 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key VARCHAR(255) PRIMARY KEY,
@@ -110,7 +110,7 @@ async def init_db():
                     updated_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
-            logger.info("数据表已使用全新结构创建完成。")
+            logger.info("数据表检查和创建完成。")
             
             # 检查并设置 GOD_USER_ID
             god_user_id_str = os.environ.get("GOD_USER_ID")
@@ -133,7 +133,7 @@ async def init_db():
 # ... (get_pool, db_execute 等其他函数保持不变) ...
 async def get_pool():
     global pool
-    if pool is None or pool.is_closing(): # 增加一个 is_closing 的判断
+    if pool is None or pool.is_closing():
         await init_db()
     return pool
 
