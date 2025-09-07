@@ -15,41 +15,45 @@ pool: asyncpg.Pool | None = None
 async def init_db():
     """
     初始化数据库连接池并创建表（如果不存在）。
-    包含一次性的、强制性的爆破操作。
+    此版本专门为 Neon.tech 数据库优化。
     """
     global pool
     
+    # 如果连接池已存在且未关闭，先关闭它，确保我们总是用新配置创建
+    if pool is not None and not pool.is_closing():
+        logger.warning("检测到已存在的连接池，将强制关闭以应用新配置。")
+        await pool.close()
+        pool = None
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         logger.critical("DATABASE_URL 环境变量未设置！")
         raise ValueError("DATABASE_URL is not set")
 
     try:
-        # --- 最终爆破手段 ---
-        # 无论如何，都先建立一个临时连接
-        conn = await asyncpg.connect(database_url)
-        logger.warning("!!! 正在执行一次性爆破操作 !!!")
-        # 尝试强制删除所有可能导致问题的表
-        await conn.execute("DROP TABLE IF EXISTS evaluations CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS favorites CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS admins CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS users CASCADE;") # 最关键的一步
-        await conn.execute("DROP TABLE IF EXISTS tags CASCADE;")
-        await conn.execute("DROP TABLE IF EXISTS settings CASCADE;")
-        logger.warning("!!! 爆破操作完成，所有旧表已被强制删除 !!!")
-        await conn.close()
-        # --- 爆破结束 ---
-
-        # 强制关闭任何可能存在的旧连接池
-        if pool is not None and not pool.is_closing():
-            await pool.close()
-        
-        logger.info("正在创建全新的数据库连接池...")
-        pool = await asyncpg.create_pool(database_url)
-        logger.info("数据库连接池已成功创建。")
+        # --- 针对 Neon.tech 的关键优化 ---
+        # 1. statement_cache_size=0 禁用预编译指令缓存，避免 schema a变化导致的问题
+        # 2. command_timeout 设置一个命令超时，避免因 Neon 休眠唤醒导致长时间卡顿
+        logger.info("正在为 Neon.tech 创建新的数据库连接池...")
+        pool = await asyncpg.create_pool(
+            dsn=database_url, 
+            statement_cache_size=0,
+            command_timeout=60 
+        )
+        logger.info("数据库连接池已成功创建 (Neon 优化模式)。")
         
         async with pool.acquire() as connection:
-            logger.info("正在使用全新结构创建所有数据表...")
+            logger.info("正在检查并创建数据表...")
+            # 为了绝对保险，我们先删除所有表，再重建
+            logger.warning("!!! 正在执行一次性爆破操作以确保数据库结构最新 !!!")
+            await connection.execute("DROP TABLE IF EXISTS evaluations CASCADE;")
+            await connection.execute("DROP TABLE IF EXISTS favorites CASCADE;")
+            await connection.execute("DROP TABLE IF EXISTS admins CASCADE;")
+            await connection.execute("DROP TABLE IF EXISTS users CASCADE;")
+            await connection.execute("DROP TABLE IF EXISTS tags CASCADE;")
+            await connection.execute("DROP TABLE IF EXISTS settings CASCADE;")
+            logger.warning("!!! 爆破操作完成。")
+
             # 创建 users 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -61,7 +65,7 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
-            # 创建 admins 表
+            # ... (其他 CREATE TABLE 语句保持不变) ...
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS admins (
                     pkid SERIAL PRIMARY KEY,
@@ -70,7 +74,6 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
-            # 创建 tags 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS tags (
                     pkid SERIAL PRIMARY KEY,
@@ -80,7 +83,6 @@ async def init_db():
                     UNIQUE(name, type)
                 );
             """)
-            # 创建 evaluations 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS evaluations (
                     pkid SERIAL PRIMARY KEY,
@@ -92,7 +94,6 @@ async def init_db():
                     UNIQUE(user_pkid, target_user_pkid, tag_pkid)
                 );
             """)
-            # 创建 favorites 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS favorites (
                     pkid SERIAL PRIMARY KEY,
@@ -102,7 +103,6 @@ async def init_db():
                     UNIQUE(user_pkid, target_user_pkid)
                 );
             """)
-            # 创建 settings 表
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key VARCHAR(255) PRIMARY KEY,
@@ -115,15 +115,14 @@ async def init_db():
             # 检查并设置 GOD_USER_ID
             god_user_id_str = os.environ.get("GOD_USER_ID")
             if god_user_id_str:
-                # ... (这部分代码不变) ...
                 try:
                     god_user_id = int(god_user_id_str)
-                    user_record = await connection.fetchrow("SELECT pkid FROM users WHERE id = $1", god_user_id)
-                    if user_record:
-                        await connection.execute("INSERT INTO admins (user_pkid) VALUES ($1) ON CONFLICT (user_pkid) DO NOTHING", user_record['pkid'])
+                    god_user_record = await connection.fetchrow("SELECT pkid FROM users WHERE id = $1", god_user_id)
+                    if god_user_record:
+                        await connection.execute("INSERT INTO admins (user_pkid) VALUES ($1) ON CONFLICT (user_pkid) DO NOTHING", god_user_record['pkid'])
                         logger.info(f"已确保 GOD 用户 (ID: {god_user_id}) 是管理员。")
                     else:
-                        logger.warning(f"GOD_USER_ID (ID: {god_user_id}) 在 users 表中未找到。请确保该用户已与机器人互动过。")
+                        logger.warning(f"GOD_USER_ID (ID: {god_user_id}) 在 users 表中未找到。")
                 except Exception as e:
                     logger.error(f"设置 GOD 用户时出错: {e}")
 
@@ -132,10 +131,9 @@ async def init_db():
         raise
 
 # ... (get_pool, db_execute 等其他函数保持不变) ...
-# ... (为简洁起见，省略了其他函数的代码，请您只修改 init_db 函数，或直接用上面的完整代码覆盖) ...
 async def get_pool():
     global pool
-    if pool is None:
+    if pool is None or pool.is_closing(): # 增加一个 is_closing 的判断
         await init_db()
     return pool
 
