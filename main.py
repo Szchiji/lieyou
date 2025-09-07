@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from telegram import Update
 from telegram.ext import (
-    Application, # Import Application instead of ApplicationBuilder for the new structure
+    Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -14,7 +14,6 @@ from telegram.ext import (
 )
 
 import database
-# This will import all necessary handlers from the bot_handlers package
 from bot_handlers import *
 
 # --- Logging Setup ---
@@ -32,21 +31,22 @@ async def main() -> None:
         logger.critical("BOT_TOKEN not found in environment variables. Bot cannot start.")
         return
 
-    # --- Database and Application Setup ---
+    # --- Database Setup ---
     try:
-        # Initialize the database before building the application
         await database.init_db()
     except Exception as e:
         logger.critical(f"Database initialization failed: {e}. Bot cannot start.", exc_info=True)
         return
 
-    # Build the application using a more robust lifecycle management approach
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # --- Register Cleanup Hook ---
-    # This is the key fix: We tell the application to run our cleanup function
-    # *after* it has completely shut down. This avoids the event loop conflict.
-    application.post_shutdown(database.close_pool)
+    # --- KEY FIX: Build the application with post_shutdown hook ---
+    # The cleanup function is now registered during the build process.
+    # This is the correct, documented way for python-telegram-bot v20+.
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_shutdown(database.close_pool) # Register the async cleanup function here
+        .build()
+    )
 
     # --- Conversation Handlers ---
     admin_conv = ConversationHandler(
@@ -93,13 +93,12 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
 
     # --- Start Background Tasks ---
-    # Use the application's task manager to ensure graceful shutdown
     application.create_task(run_suspicion_monitor(application.bot))
 
     # --- Run the Bot ---
-    # This will run the bot until you press Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT. This is the recommended way to run the bot.
     logger.info("Bot is starting polling...")
+    # The run_polling() method is blocking, so the script will stay running.
+    # When the process is stopped, the post_shutdown hook will be called automatically.
     await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
@@ -107,6 +106,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown requested. Exiting gracefully.")
+        logger.info("Bot shutdown requested by user or system. Exiting gracefully.")
     except Exception as e:
         logger.critical(f"Critical error in main execution: {e}", exc_info=True)
