@@ -19,8 +19,15 @@ load_dotenv()
 # 导入数据库初始化函数
 from database import init_db
 
-# 导入所有处理函数
-from handlers import start, admin, favorites, leaderboard, reputation, statistics
+# --- 导入处理程序模块 ---
+# 这是解决循环导入问题的关键：逐个、明确地导入每个模块。
+from handlers import start
+from handlers import admin
+from handlers import favorites
+from handlers import leaderboard
+from handlers import reputation
+from handlers import statistics
+# utils 不需要在这里导入，因为它被其他 handlers 模块内部使用
 
 # 配置日志
 logging.basicConfig(
@@ -119,7 +126,7 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(admin.leaderboard_panel, pattern=r"^admin_leaderboard$"))
     application.add_handler(CallbackQueryHandler(leaderboard.clear_leaderboard_cache, pattern=r"^admin_clear_lb_cache$"))
     
-    # --- 新增的管理员回调：入群设置 ---
+    # 新增的管理员回调：入群设置
     application.add_handler(CallbackQueryHandler(admin.membership_settings, pattern=r"^admin_membership$"))
     application.add_handler(CallbackQueryHandler(admin.set_invite_link, pattern=r"^admin_set_link$"))
     application.add_handler(CallbackQueryHandler(admin.clear_membership_settings, pattern=r"^admin_clear_membership$"))
