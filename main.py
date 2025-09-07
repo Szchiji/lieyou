@@ -1,171 +1,133 @@
 import logging
 import os
 import asyncio
-import re
-import uvicorn
-from fastapi import FastAPI
-
 from dotenv import load_dotenv
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+
 from telegram import Update
-
-# 从您的专业模块中导入所有处理器
-from bot_handlers import (
-    admin as admin_handlers,
-    favorites as favorites_handlers,
-    leaderboard as leaderboard_handlers,
-    reputation as reputation_handlers,
-    help as help_handlers,
-    utils as utils_handlers,
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    filters
 )
-import database
 
-# --- 初始化 ---
-load_dotenv()
+import database
+from bot_handlers import *
+
+# --- Logging Setup ---
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# --- Web服务器，用于Render健康检查 ---
-web_app = FastAPI()
-@web_app.get("/")
-async def health_check():
-    return {"status": "Bot is running"}
-
-# --- 主程序 ---
 async def main():
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        raise ValueError("请设置 TELEGRAM_TOKEN 环境变量")
+    """The main entry point for the bot."""
+    load_dotenv()
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    if not BOT_TOKEN:
+        logger.critical("BOT_TOKEN not found in .env file. Bot cannot start.")
+        return
 
-    application = Application.builder().token(token).build()
+    # Initialize database
+    await database.init_db()
 
-    # --- 注册处理器 ---
+    # Build the application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # --- Conversation Handlers ---
+    # These need to be defined before they are added to the application
     
-    # 1. 命令处理器
-    # 这些命令现在是用户与机器人在群组中互动的主要入口。
-    # 它们内部已经包含了区分群聊和私聊的逻辑。
-    application.add_handler(CommandHandler("start", help_handlers.send_help_message))
-    application.add_handler(CommandHandler("bang", leaderboard_handlers.leaderboard_command))
-    application.add_handler(CommandHandler("admin", admin_handlers.admin_panel))
-    application.add_handler(CommandHandler("myfav", favorites_handlers.my_favorites))
+    # For adding new tags
+    add_tag_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$')],
+        states={
+            TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
+            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern=r'^tag_type_')],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_action)],
+    )
 
-    # 2. 消息处理器
-    # - 处理私聊中的文本，用于管理员输入（如添加标签、设置邀请链接等）
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, admin_handlers.handle_private_message))
-    # - 处理私聊中的转发消息，用于管理员绑定强制入群的群组
-    application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, admin_handlers.handle_private_message))
-    # - 处理群聊和私聊中的 @username 查询，这是核心的声誉查询功能
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@(\w+)'), reputation_handlers.handle_query))
+    # For managing users (hide/unhide)
+    user_manage_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(prompt_for_username, pattern=r'^admin_hide_user_prompt$'),
+            CallbackQueryHandler(prompt_for_username, pattern=r'^admin_unhide_user_prompt$'),
+        ],
+        states={
+            TYPING_USERNAME_TO_HIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
+            TYPING_USERNAME_TO_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_action)],
+    )
+
+    # For sending broadcasts
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(prompt_for_broadcast, pattern=r'^admin_broadcast$')],
+        states={
+            TYPING_BROADCAST: [MessageHandler(filters.ALL & ~filters.COMMAND, get_broadcast_content)],
+            CONFIRM_BROADCAST: [CallbackQueryHandler(confirm_broadcast, pattern=r'^broadcast_')],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_action)],
+    )
+
+    # --- Register Handlers ---
     
-    # 3. 回调查询处理器
-    # 使用正则表达式精确匹配您设计的回调数据格式，确保每个按钮都能正确触发对应功能。
+    # Commands
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("myreport", generate_my_report))
     
-    # 导航
-    application.add_handler(CallbackQueryHandler(help_handlers.send_help_message, pattern=r'^back_to_help$'))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: reputation_handlers.back_to_rep_card(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
-        pattern=r'^back_to_rep_card_(\d+)_(.+)$'
-    ))
+    # Messages
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_menu_callback_handler))
+    application.add_handler(MessageHandler(filters.Entity("mention") & filters.ChatType.GROUPS, handle_query))
 
-    # 声誉系统
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: reputation_handlers.vote_menu(u, c, target_pkid=int(c.match.group(2)), vote_type=c.match.group(1), target_username=c.match.group(3)),
-        pattern=r'^vote_(recommend|block)_(\d+)_(.+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: reputation_handlers.process_vote(u, c, target_pkid=int(c.match.group(1)), tag_pkid=int(c.match.group(2)), target_username=c.match.group(3)),
-        pattern=r'^process_vote_(\d+)_(\d+)_(.+)$'
-    ))
+    # Callback Queries for Reputation and Tags
+    application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_'))
+    application.add_handler(CallbackQueryHandler(reputation.tag_callback_handler, pattern=r'^tag_')) # Import from reputation module
 
-    # 收藏夹
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: favorites_handlers.my_favorites(u, c, page=int(c.match.group(1))),
-        pattern=r'^my_favorites_(\d+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: favorites_handlers.add_favorite(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
-        pattern=r'^add_favorite_(\d+)_(.+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: favorites_handlers.remove_favorite(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
-        pattern=r'^remove_favorite_(\d+)_(.+)$'
-    ))
+    # Callback Queries for Leaderboards
+    application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
+    application.add_handler(CallbackQueryHandler(leaderboard.leaderboard_type_callback_handler, pattern=r'^lb_'))
 
-    # 排行榜
-    application.add_handler(CallbackQueryHandler(leaderboard_handlers.show_leaderboard_menu, pattern=r'^leaderboard_menu$'))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: leaderboard_handlers.get_leaderboard_page(u, c, leaderboard_type=c.match.group(1), page=int(c.match.group(2))),
-        pattern=r'^leaderboard_(recommend|block|score|popularity)_(\d+)$'
-    ))
-
-    # 统计 (假设存在于 utils.py)
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: utils_handlers.show_user_stats(u, c, target_pkid=int(c.match.group(1)), page=int(c.match.group(2)), target_username=c.match.group(3)),
-        pattern=r'^stats_user_(\d+)_(\d+)_(.+)$'
-    ))
+    # Callback Queries for Admin Panel Navigation
+    application.add_handler(CallbackQueryHandler(admin_panel, pattern=r'^admin_panel$'))
+    application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
     
-    # 管理员
-    application.add_handler(CallbackQueryHandler(admin_handlers.admin_panel, pattern=r'^admin_panel$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.add_admin, pattern=r'^admin_add$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.manage_tags, pattern=r'^admin_tags$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.leaderboard_panel, pattern=r'^admin_leaderboard$'))
-    application.add_handler(CallbackQueryHandler(leaderboard_handlers.clear_leaderboard_cache, pattern=r'^admin_clear_lb_cache$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.membership_settings, pattern=r'^admin_membership$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.set_invite_link, pattern=r'^admin_set_link$'))
-    application.add_handler(CallbackQueryHandler(admin_handlers.clear_membership_settings, pattern=r'^admin_clear_membership$'))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: admin_handlers.add_tag(u, c, tag_type=c.match.group(1)),
-        pattern=r'^admin_add_tag_(recommend|block)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: admin_handlers.remove_admin_menu(u, c, page=int(c.match.group(1))),
-        pattern=r'^admin_remove_menu_(\d+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: admin_handlers.confirm_remove_admin(u, c, user_pkid_to_remove=int(c.match.group(1))),
-        pattern=r'^admin_remove_confirm_(\d+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: admin_handlers.remove_tag_menu(u, c, tag_type=c.match.group(1), page=int(c.match.group(2))),
-        pattern=r'^admin_remove_tag_menu_(recommend|block)_(\d+)$'
-    ))
-    application.add_handler(CallbackQueryHandler(
-        lambda u, c: admin_handlers.confirm_remove_tag(u, c, tag_pkid=int(c.match.group(1))),
-        pattern=r'^admin_remove_tag_confirm_(\d+)$'
-    ))
+    # Admin Features (Tags, Menu, Users)
+    application.add_handler(CallbackQueryHandler(manage_tags_panel, pattern=r'^admin_manage_tags$'))
+    application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_'))
+    # application.add_handler(CallbackQueryHandler(toggle_tag_callback, pattern=r'^admin_toggle_tag_')) # Add if implemented
     
-    # --- 启动 ---
-    async with application:
-        await database.init_db()
-        logger.info("数据库初始化完成。")
+    application.add_handler(CallbackQueryHandler(manage_menu_buttons_panel, pattern=r'^admin_menu_buttons$'))
+    
+    application.add_handler(CallbackQueryHandler(user_management_panel, pattern=r'^admin_user_management$'))
 
-        await application.start()
-        await application.updater.start_polling(drop_pending_updates=True)
-        logger.info("机器人 Polling 已启动。")
+    # Add Conversation Handlers
+    application.add_handler(add_tag_conv)
+    application.add_handler(user_manage_conv)
+    application.add_handler(broadcast_conv)
 
-        # 启动 web 服务器
-        port = int(os.environ.get("PORT", 10000))
-        config = uvicorn.Config(web_app, host="0.0.0.0", port=port, log_level="info")
-        server = uvicorn.Server(config)
-        
-        logger.info(f"健康检查服务器将在端口 {port} 上启动。")
-        await server.serve()
+    # --- Start Background Tasks ---
+    monitor_task = asyncio.create_task(run_suspicion_monitor(application.bot))
 
-        logger.info("Web 服务器已停止，正在关闭机器人...")
-        await application.updater.stop()
-        await application.stop()
+    # --- Run the Bot ---
+    try:
+        logger.info("Bot is starting polling...")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        # --- Clean Shutdown ---
+        logger.info("Bot is shutting down. Cleaning up...")
+        monitor_task.cancel()
+        await database.close_pool()
+        logger.info("Cleanup complete. Goodbye!")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("机器人已关闭。")
+    except KeyboardInterrupt:
+        logger.info("Process interrupted by user.")
+    except Exception as e:
+        logger.critical(f"Critical error in main execution: {e}", exc_info=True)
