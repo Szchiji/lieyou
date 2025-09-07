@@ -33,11 +33,7 @@ async def init_db():
 
     try:
         logger.info("正在为 Neon.tech 创建新的数据库连接池...")
-        pool = await asyncpg.create_pool(
-            dsn=database_url, 
-            statement_cache_size=0,
-            command_timeout=60 
-        )
+        pool = await asyncpg.create_pool(dsn=database_url, statement_cache_size=0, command_timeout=60)
         logger.info("数据库连接池已成功创建 (Neon 优化模式)。")
         
         async with pool.acquire() as connection:
@@ -52,6 +48,7 @@ async def init_db():
                     created_at TIMESTAMPTZ DEFAULT now()
                 );
             """)
+            # ... 其他表的创建语句保持不变 ...
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS admins (
                     pkid SERIAL PRIMARY KEY, user_pkid INTEGER UNIQUE REFERENCES users(pkid) ON DELETE CASCADE,
@@ -102,66 +99,88 @@ async def init_db():
 
 async def get_pool():
     global pool
-    if pool is None or pool.is_closing():
-        await init_db()
+    if pool is None or pool.is_closing(): await init_db()
     return pool
 
 async def db_execute(query, *args):
     conn_pool = await get_pool()
-    async with conn_pool.acquire() as connection:
-        return await connection.execute(query, *args)
+    async with conn_pool.acquire() as connection: return await connection.execute(query, *args)
 
 async def db_fetch_all(query, *args):
     conn_pool = await get_pool()
-    async with conn_pool.acquire() as connection:
-        return await connection.fetch(query, *args)
+    async with conn_pool.acquire() as connection: return await connection.fetch(query, *args)
 
 async def db_fetch_one(query, *args):
     conn_pool = await get_pool()
-    async with conn_pool.acquire() as connection:
-        return await connection.fetchrow(query, *args)
+    async with conn_pool.acquire() as connection: return await connection.fetchrow(query, *args)
 
 async def db_fetch_val(query, *args):
     conn_pool = await get_pool()
-    async with conn_pool.acquire() as connection:
-        return await connection.fetchval(query, *args)
+    async with conn_pool.acquire() as connection: return await connection.fetchval(query, *args)
+
+# --- 核心逻辑重写 ---
 
 async def get_or_create_user(user: User) -> dict:
+    """
+    为真实TG用户（有ID）创建或更新记录。
+    新逻辑：分步操作，避免复杂的 ON CONFLICT。
+    """
     if not user.username:
         raise ValueError("请先为您的Telegram账户设置一个用户名。")
     username_lower = user.username.lower()
     
-    query = """
-    INSERT INTO users (id, username, first_name, last_name)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (id) DO UPDATE 
-    SET username = EXCLUDED.username, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name
-    RETURNING *;
-    """
-    try:
-        user_record = await db_fetch_one(query, user.id, username_lower, user.first_name, user.last_name)
-    except asyncpg.UniqueViolationError: 
-        await db_execute("UPDATE users SET id = $1, first_name = $2, last_name = $3 WHERE username = $4 AND id IS NULL",
-                         user.id, user.first_name, user.last_name, username_lower)
-        user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
+    # 1. 尝试通过 ID 查找
+    user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
+    if user_record:
+        # 找到了，检查信息是否需要更新
+        if user_record['username'] != username_lower or user_record['first_name'] != user.first_name:
+            await db_execute(
+                "UPDATE users SET username = $1, first_name = $2, last_name = $3 WHERE id = $4",
+                username_lower, user.first_name, user.last_name, user.id
+            )
+            user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
+        return dict(user_record)
 
+    # 2. 没找到，尝试通过 username 查找（可能之前被作为target创建过）
+    user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
+    if user_record:
+        # 找到了，说明这是一个之前只有username的记录，现在补全信息
+        await db_execute(
+            "UPDATE users SET id = $1, first_name = $2, last_name = $3 WHERE username = $4",
+            user.id, user.first_name, user.last_name, username_lower
+        )
+        user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
+        return dict(user_record)
+
+    # 3. 数据库里完全没有这个用户，直接创建
+    user_record = await db_fetch_one(
+        "INSERT INTO users (id, username, first_name, last_name) VALUES ($1, $2, $3, $4) RETURNING *",
+        user.id, username_lower, user.first_name, user.last_name
+    )
     return dict(user_record)
 
 
 async def get_or_create_target(username: str) -> dict:
+    """
+    为被评价的目标（可能没有ID）创建记录。
+    新逻辑：保持简单，只处理username。
+    """
     username_lower = username.lower().strip('@')
     
+    # 1. 尝试通过 username 查找
     user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
-    if not user_record:
-        await db_execute("INSERT INTO users (username) VALUES ($1) ON CONFLICT (username) DO NOTHING", username_lower)
-        user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
+    if user_record:
+        return dict(user_record)
 
+    # 2. 没找到，直接插入一条只有 username 的记录
+    # ON CONFLICT 仍然是必要的，以防并发操作
+    await db_execute("INSERT INTO users (username) VALUES ($1) ON CONFLICT (username) DO NOTHING", username_lower)
+    user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
     return dict(user_record)
 
 async def is_admin(user_id: int) -> bool:
     user_pkid = await db_fetch_val("SELECT pkid FROM users WHERE id = $1", user_id)
-    if not user_pkid:
-        return False
+    if not user_pkid: return False
     admin_record = await db_fetch_one("SELECT 1 FROM admins WHERE user_pkid = $1", user_pkid)
     return admin_record is not None
 
@@ -172,10 +191,4 @@ async def set_setting(key: str, value: str | None):
     if value is None:
         await db_execute("DELETE FROM settings WHERE key = $1", key)
     else:
-        await db_execute(
-            """
-            INSERT INTO settings (key, value) VALUES ($1, $2)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-            """,
-            key, value
-        )
+        await db_execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key, value)
