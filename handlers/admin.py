@@ -1,11 +1,10 @@
 import logging
-import re
+import asyncpg
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from math import ceil
 
-# --- 修正导入：现在 db_fetch_val 存在了 ---
-from database import db_execute, db_fetch_all, db_fetch_one, get_or_create_user, db_fetch_val, is_admin, get_or_create_target
+from database import db_execute, db_fetch_all, db_fetch_one, get_or_create_user, db_fetch_val, is_admin, get_or_create_target, set_setting, get_setting
 
 logger = logging.getLogger(__name__)
 ADMIN_PAGE_SIZE = 5
@@ -23,6 +22,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👑 管理员列表", callback_data="admin_add")],
         [InlineKeyboardButton("🔖 标签管理", callback_data="admin_tags")],
         [InlineKeyboardButton("🏆 排行榜管理", callback_data="admin_leaderboard")],
+        [InlineKeyboardButton("🚪 入群设置", callback_data="admin_membership")],
         [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_to_help")]
     ]
     if update.callback_query:
@@ -46,7 +46,7 @@ async def remove_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         JOIN admins a ON u.pkid = a.user_pkid
         ORDER BY u.username
     """)
-    total_pages = ceil(len(admins) / ADMIN_PAGE_SIZE)
+    total_pages = ceil(len(admins) / ADMIN_PAGE_SIZE) if admins else 1
     page = max(1, min(page, total_pages))
     offset = (page - 1) * ADMIN_PAGE_SIZE
     admins_on_page = admins[offset : offset + ADMIN_PAGE_SIZE]
@@ -68,7 +68,8 @@ async def confirm_remove_admin(update: Update, context: ContextTypes.DEFAULT_TYP
     """确认移除管理员。"""
     if not await is_admin(update.effective_user.id): return
     admin_to_remove = await db_fetch_one("SELECT username, id FROM users WHERE pkid = $1", user_pkid_to_remove)
-    if str(admin_to_remove['id']) == os.environ.get("GOD_USER_ID"):
+    god_user_id = os.environ.get("GOD_USER_ID")
+    if god_user_id and str(admin_to_remove['id']) == god_user_id:
         await update.callback_query.answer("🚫 不能移除 GOD 用户！", show_alert=True)
         return
     
@@ -102,7 +103,7 @@ async def remove_tag_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
     """分页显示可移除的标签列表。"""
     if not await is_admin(update.effective_user.id): return
     tags = await db_fetch_all("SELECT pkid, name FROM tags WHERE type = $1 ORDER BY name", tag_type)
-    total_pages = ceil(len(tags) / ADMIN_PAGE_SIZE)
+    total_pages = ceil(len(tags) / ADMIN_PAGE_SIZE) if tags else 1
     page = max(1, min(page, total_pages))
     offset = (page - 1) * ADMIN_PAGE_SIZE
     tags_on_page = tags[offset : offset + ADMIN_PAGE_SIZE]
@@ -140,22 +141,95 @@ async def leaderboard_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理管理员在私聊中发送的文本。"""
+async def membership_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示入群设置面板。"""
     if not await is_admin(update.effective_user.id): return
+    
+    chat_id = await get_setting('MANDATORY_CHAT_ID')
+    chat_link = await get_setting('MANDATORY_CHAT_LINK')
+    
+    text = "🚪 **入群设置**\n\n此功能可以强制用户必须加入指定群组/频道后才能使用机器人。\n\n"
+    if not chat_id:
+        text += "**当前状态：** 未开启\n\n"
+        text += "要开启此功能，请**转发一条来自目标公开群组/频道的消息**到这里，我将自动识别它。"
+        keyboard = [[InlineKeyboardButton("🔙 返回管理面板", callback_data="admin_panel")]]
+    else:
+        text += f"**当前状态：** 已开启\n"
+        text += f"**绑定群组/频道 ID：** `{chat_id}`\n"
+        text += f"**邀请链接：** {chat_link or '未设置'}\n\n"
+        text += "您可以转发新消息来更改绑定的群组，或输入新链接来更新邀请链接。"
+        keyboard = [
+            [InlineKeyboardButton("更新邀请链接", callback_data="admin_set_link")],
+            [InlineKeyboardButton("❌ 关闭此功能", callback_data="admin_clear_membership")],
+            [InlineKeyboardButton("🔙 返回管理面板", callback_data="admin_panel")]
+        ]
+    
+    context.user_data['next_action'] = 'set_mandatory_chat'
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def set_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """提示管理员输入邀请链接。"""
+    if not await is_admin(update.effective_user.id): return
+    context.user_data['next_action'] = 'set_invite_link'
+    text = "请输入新的邀请链接 (例如: `https://t.me/your_group_link`)。"
+    keyboard = [[InlineKeyboardButton("🔙 返回入群设置", callback_data="admin_membership")]]
+    await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def clear_membership_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """清除强制入群的设置。"""
+    if not await is_admin(update.effective_user.id): return
+    await set_setting('MANDATORY_CHAT_ID', '')
+    await set_setting('MANDATORY_CHAT_LINK', '')
+    await update.callback_query.answer("✅ 强制入群功能已关闭。", show_alert=True)
+    await membership_settings(update, context)
+
+async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理管理员在私聊中发送的文本和转发的消息。"""
+    if not await is_admin(update.effective_user.id): return
+    
     action = context.user_data.get('next_action')
     if not action: return
 
-    text = update.message.text.strip()
-    del context.user_data['next_action']
+    # 处理转发消息以设置群ID
+    if action == 'set_mandatory_chat' and update.message.forward_from_chat:
+        chat = update.message.forward_from_chat
+        await set_setting('MANDATORY_CHAT_ID', str(chat.id))
+        del context.user_data['next_action']
+        await update.message.reply_text(
+            f"✅ 绑定成功！\n"
+            f"**群组/频道名称：** {chat.title}\n"
+            f"**ID:** `{chat.id}`\n\n"
+            f"现在，请为我提供一个该群组/频道的**邀请链接** (例如 `https://t.me/joinchat/...` 或 `https://t.me/public_channel`)，否则用户将无法加入。"
+        )
+        context.user_data['next_action'] = 'set_invite_link'
+        return
+    
+    # 如果是其他action，但收到了转发消息，可以给个提示
+    if update.message.forward_from_chat:
+        await update.message.reply_text("🤔 我现在不需要转发消息哦。请根据提示输入文本。")
+        return
 
+    text = update.message.text.strip()
+
+    # 处理输入的邀请链接
+    if action == 'set_invite_link':
+        if text.startswith('https://t.me/'):
+            await set_setting('MANDATORY_CHAT_LINK', text)
+            await update.message.reply_text(f"✅ 邀请链接已更新为：\n{text}")
+            del context.user_data['next_action']
+            await membership_settings(update, context) # 显示更新后的状态
+        else:
+            await update.message.reply_text("❌ 格式错误，请输入一个有效的 `https://t.me/...` 链接。")
+        return
+
+    # 处理添加管理员
     if action == 'add_admin':
         target_user = None
         if text.isdigit():
             user_id = int(text)
-            # 我们需要一个方法通过ID找到用户，但用户可能还不在数据库
-            # 最好的方法是让管理员从群里转发一条消息，但这太复杂
-            # 简单起见，我们要求用户必须和机器人互动过
             target_user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user_id)
             if not target_user_record:
                 await update.message.reply_text(f"❌ 找不到 ID 为 {user_id} 的用户。请确保该用户已与机器人开始对话。")
@@ -175,8 +249,12 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         await db_execute("INSERT INTO admins (user_pkid, added_by_pkid) VALUES ($1, $2) ON CONFLICT (user_pkid) DO NOTHING",
                          target_user['pkid'], (await get_or_create_user(update.effective_user))['pkid'])
         await update.message.reply_text(f"✅ @{target_user['username']} 已被添加为管理员。")
+        del context.user_data['next_action']
+        await admin_panel(update, context) # 返回主管理菜单
+        return
 
-    elif action.startswith('add_tag_'):
+    # 处理添加标签
+    if action.startswith('add_tag_'):
         tag_type = action.split('_')[-1]
         tag_name = text
         if len(tag_name) > 50:
@@ -190,3 +268,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             logger.error(f"添加标签失败: {e}")
             await update.message.reply_text("❌ 添加标签时发生错误。")
+        
+        del context.user_data['next_action']
+        await manage_tags(update, context) # 返回标签管理菜单
+        return
