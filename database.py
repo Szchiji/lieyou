@@ -10,11 +10,11 @@ pool: asyncpg.Pool | None = None
 
 async def init_db():
     """
-    初始化数据库连接池并创建表（如果不存在）。
-    此版本增加了 menu_buttons 表。
+    初始化数据库连接池并创建所有表。这是最终完整版。
     """
     global pool
-    if pool and not pool.is_closing(): return
+    if pool and not pool.is_closing():
+        return
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -26,7 +26,6 @@ async def init_db():
         
         async with pool.acquire() as connection:
             logger.info("正在检查并创建数据表...")
-            # 创建 users, admins, tags, evaluations, favorites, settings 表（代码与上一版相同，此处省略以保持简洁）
             await connection.execute("""
                 CREATE TABLE IF NOT EXISTS users ( pkid SERIAL PRIMARY KEY, id BIGINT UNIQUE, username VARCHAR(255) UNIQUE, first_name VARCHAR(255), last_name VARCHAR(255), created_at TIMESTAMPTZ DEFAULT now());
                 CREATE TABLE IF NOT EXISTS admins ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER UNIQUE REFERENCES users(pkid) ON DELETE CASCADE, added_by_pkid INTEGER REFERENCES users(pkid) ON DELETE SET NULL, created_at TIMESTAMPTZ DEFAULT now());
@@ -34,29 +33,25 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS evaluations ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER REFERENCES users(pkid) ON DELETE CASCADE, target_user_pkid INTEGER REFERENCES users(pkid) ON DELETE CASCADE, tag_pkid INTEGER REFERENCES tags(pkid) ON DELETE CASCADE, type VARCHAR(50) NOT NULL, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(user_pkid, target_user_pkid, tag_pkid));
                 CREATE TABLE IF NOT EXISTS favorites ( pkid SERIAL PRIMARY KEY, user_pkid INTEGER REFERENCES users(pkid) ON DELETE CASCADE, target_user_pkid INTEGER REFERENCES users(pkid) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT now(), UNIQUE(user_pkid, target_user_pkid));
                 CREATE TABLE IF NOT EXISTS settings ( key VARCHAR(255) PRIMARY KEY, value TEXT, updated_at TIMESTAMPTZ DEFAULT now());
-            """)
-
-            # --- 新增的 menu_buttons 表 ---
-            await connection.execute("""
-                CREATE TABLE IF NOT EXISTS menu_buttons (
-                    id SERIAL PRIMARY KEY,
-                    command VARCHAR(32) UNIQUE NOT NULL,
-                    description VARCHAR(255) NOT NULL,
-                    is_enabled BOOLEAN DEFAULT TRUE,
-                    sort_order INTEGER DEFAULT 0
-                );
+                CREATE TABLE IF NOT EXISTS menu_buttons ( id SERIAL PRIMARY KEY, command VARCHAR(32) UNIQUE NOT NULL, description VARCHAR(255) NOT NULL, text VARCHAR(255), is_enabled BOOLEAN DEFAULT TRUE, sort_order INTEGER DEFAULT 0 );
             """)
             logger.info("数据表检查和创建完成。")
 
-            # 初始化默认菜单按钮（如果表是空的）
+            # 确保 menu_buttons 表有 text 字段
+            try:
+                await connection.execute("ALTER TABLE menu_buttons ADD COLUMN IF NOT EXISTS text VARCHAR(255);")
+            except asyncpg.DuplicateColumnError:
+                pass
+
             default_buttons = await connection.fetchval("SELECT 1 FROM menu_buttons LIMIT 1")
             if not default_buttons:
+                await connection.execute("DELETE FROM menu_buttons;")
                 await connection.executemany("""
-                    INSERT INTO menu_buttons (command, description, sort_order) VALUES ($1, $2, $3)
+                    INSERT INTO menu_buttons (command, description, text, sort_order) VALUES ($1, $2, $3, $4)
                 """, [
-                    ('start', '🚀 打开主菜单', 10),
-                    ('bang', '🏆 查看排行榜', 20),
-                    ('help', 'ℹ️ 获取帮助', 99)
+                    ('main_menu', '打开私聊主菜单', '🚀 主菜单', 10),
+                    ('leaderboard', '查看排行榜', '🏆 排行榜', 20),
+                    ('help', '获取帮助信息', 'ℹ️ 帮助', 99)
                 ])
                 logger.info("已初始化默认底部菜单按钮。")
             
@@ -75,7 +70,7 @@ async def init_db():
         logger.critical(f"数据库初始化期间发生致命错误: {e}", exc_info=True)
         raise
 
-# 其他函数 (get_pool, db_execute, get_or_create_user 等) 保持不变，此处省略
+# --- 数据库操作函数 (完整版) ---
 async def get_pool():
     global pool
     if pool is None or pool.is_closing(): await init_db()
@@ -104,30 +99,26 @@ async def get_or_create_user(user: User) -> dict:
     if user_record:
         if user_record['username'] != username_lower or user_record['first_name'] != user.first_name:
             await db_execute("UPDATE users SET username = $1, first_name = $2, last_name = $3 WHERE id = $4", username_lower, user.first_name, user.last_name, user.id)
-            user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
-        return dict(user_record)
+        return dict(await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id))
     user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
     if user_record:
         await db_execute("UPDATE users SET id = $1, first_name = $2, last_name = $3 WHERE username = $4", user.id, user.first_name, user.last_name, username_lower)
-        user_record = await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id)
-        return dict(user_record)
-    user_record = await db_fetch_one("INSERT INTO users (id, username, first_name, last_name) VALUES ($1, $2, $3, $4) RETURNING *", user.id, username_lower, user.first_name, user.last_name)
-    return dict(user_record)
+        return dict(await db_fetch_one("SELECT * FROM users WHERE id = $1", user.id))
+    return dict(await db_fetch_one("INSERT INTO users (id, username, first_name, last_name) VALUES ($1, $2, $3, $4) RETURNING *", user.id, username_lower, user.first_name, user.last_name))
 
 async def get_or_create_target(username: str) -> dict:
     username_lower = username.lower().strip('@')
     user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
     if user_record: return dict(user_record)
     await db_execute("INSERT INTO users (username) VALUES ($1) ON CONFLICT (username) DO NOTHING", username_lower)
-    user_record = await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower)
-    return dict(user_record)
+    return dict(await db_fetch_one("SELECT * FROM users WHERE username = $1", username_lower))
 
 async def is_admin(user_id: int) -> bool:
     user_pkid = await db_fetch_val("SELECT pkid FROM users WHERE id = $1", user_id)
     if not user_pkid: return False
     return await db_fetch_val("SELECT 1 FROM admins WHERE user_pkid = $1", user_pkid) is not None
 
-async def get_setting(key: str) -> str | None: return await db_fetch_val("SELECT value FROM settings WHERE key = $1", key)
-async def set_setting(key: str, value: str | None):
-    if value is None: await db_execute("DELETE FROM settings WHERE key = $1", key)
-    else: await db_execute("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()", key, value)
+# --- 新增的收藏夹相关函数 ---
+async def is_favorited(user_pkid: int, target_user_pkid: int) -> bool:
+    """检查目标用户是否已被收藏"""
+    return await db_fetch_val("SELECT 1 FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2", user_pkid, target_user_pkid) is not None
