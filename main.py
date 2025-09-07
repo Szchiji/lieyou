@@ -40,82 +40,6 @@ web_app = FastAPI()
 async def health_check():
     return {"status": "Bot is running"}
 
-# --- 回调查询调度器 (核心) ---
-async def callback_query_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    一个统一的调度器，根据回调数据的前缀，分发到不同的处理器。
-    这使得代码结构更清晰，并能处理您设计的复杂回调数据。
-    """
-    query = update.callback_query
-    data = query.data
-    
-    # 匹配模式: command_arg1_arg2_...
-    parts = data.split('_')
-    command = parts[0]
-    args = parts[1:]
-
-    # 管理员相关
-    if command == 'admin':
-        if args[0] == 'panel': await admin_handlers.admin_panel(update, context)
-        elif args[0] == 'add': await admin_handlers.add_admin(update, context)
-        elif args[0] == 'tags': await admin_handlers.manage_tags(update, context)
-        elif args[0] == 'leaderboard': await admin_handlers.leaderboard_panel(update, context)
-        elif args[0] == 'membership': await admin_handlers.membership_settings(update, context)
-        elif args[0] == 'set' and args[1] == 'link': await admin_handlers.set_invite_link(update, context)
-        elif args[0] == 'clear' and args[1] == 'membership': await admin_handlers.clear_membership_settings(update, context)
-        elif args[0] == 'clear' and args[1] == 'lb' and args[2] == 'cache': await leaderboard_handlers.clear_leaderboard_cache(update, context)
-        elif args[0] == 'remove' and args[1] == 'menu': await admin_handlers.remove_admin_menu(update, context, page=int(args[2]))
-        elif args[0] == 'remove' and args[1] == 'confirm': await admin_handlers.confirm_remove_admin(update, context, user_pkid_to_remove=int(args[2]))
-        elif args[0] == 'add' and args[1] == 'tag': await admin_handlers.add_tag(update, context, tag_type=args[2])
-        elif args[0] == 'remove' and args[1] == 'tag' and args[2] == 'menu': await admin_handlers.remove_tag_menu(update, context, tag_type=args[3], page=int(args[4]))
-        elif args[0] == 'remove' and args[1] == 'tag' and args[2] == 'confirm': await admin_handlers.confirm_remove_tag(update, context, tag_pkid=int(args[3]))
-
-    # 排行榜相关
-    elif command == 'leaderboard':
-        if len(args) == 0 or args[0] == 'menu': await leaderboard_handlers.show_leaderboard_menu(update, context)
-        else: await leaderboard_handlers.get_leaderboard_page(update, context, leaderboard_type=args[0], page=int(args[1]))
-
-    # 评价相关
-    elif command == 'vote':
-        vote_type = args[0]
-        target_pkid = int(args[1])
-        target_username = args[2]
-        await reputation_handlers.vote_menu(update, context, target_pkid, vote_type, target_username)
-    elif command == 'process':
-        target_pkid = int(args[1])
-        tag_pkid = int(args[2])
-        target_username = args[3]
-        await reputation_handlers.process_vote(update, context, target_pkid, tag_pkid, target_username)
-    
-    # 收藏夹相关
-    elif command == 'my':
-        page = int(args[1]) if len(args) > 1 else 1
-        await favorites_handlers.my_favorites(update, context, page)
-    elif command == 'add':
-        target_pkid = int(args[1])
-        target_username = args[2]
-        await favorites_handlers.add_favorite(update, context, target_pkid, target_username)
-    elif command == 'remove':
-        target_pkid = int(args[1])
-        target_username = args[2]
-        await favorites_handlers.remove_favorite(update, context, target_pkid, target_username)
-
-    # 统计相关
-    elif command == 'stats':
-        target_pkid = int(args[1])
-        page = int(args[2])
-        target_username = args[3]
-        await utils_handlers.show_user_stats(update, context, target_pkid, page, target_username)
-
-    # 返回导航
-    elif command == 'back':
-        if args[0] == 'to':
-            if args[1] == 'help': await help_handlers.send_help_message(update, context)
-            elif args[1] == 'rep' and args[2] == 'card':
-                target_pkid = int(args[3])
-                target_username = args[4]
-                await reputation_handlers.back_to_rep_card(update, context, target_pkid, target_username)
-
 # --- 主程序 ---
 async def main():
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -124,14 +48,15 @@ async def main():
 
     application = Application.builder().token(token).build()
 
-    # --- 注册处理器 ---
-    # 命令处理器
+    # --- 注册处理器 (使用正则表达式精确匹配) ---
+    
+    # 1. 命令处理器
     application.add_handler(CommandHandler("start", help_handlers.send_help_message))
     application.add_handler(CommandHandler("bang", leaderboard_handlers.leaderboard_command))
     application.add_handler(CommandHandler("admin", admin_handlers.admin_panel))
     application.add_handler(CommandHandler("myfav", favorites_handlers.my_favorites))
 
-    # 消息处理器
+    # 2. 消息处理器
     # - 处理私聊中的文本，用于管理员输入
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, admin_handlers.handle_private_message))
     # - 处理转发消息，用于绑定群组
@@ -139,8 +64,81 @@ async def main():
     # - 处理 @username 查询
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@(\w+)'), reputation_handlers.handle_query))
     
-    # 统一的回调查询处理器
-    application.add_handler(CallbackQueryHandler(callback_query_dispatcher))
+    # 3. 回调查询处理器 (精确匹配，不再使用脆弱的调度器)
+    
+    # 导航
+    application.add_handler(CallbackQueryHandler(help_handlers.send_help_message, pattern=r'^back_to_help$'))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: reputation_handlers.back_to_rep_card(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
+        pattern=r'^back_to_rep_card_(\d+)_(.+)$'
+    ))
+
+    # 声誉系统
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: reputation_handlers.vote_menu(u, c, target_pkid=int(c.match.group(2)), vote_type=c.match.group(1), target_username=c.match.group(3)),
+        pattern=r'^vote_(recommend|block)_(\d+)_(.+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: reputation_handlers.process_vote(u, c, target_pkid=int(c.match.group(1)), tag_pkid=int(c.match.group(2)), target_username=c.match.group(3)),
+        pattern=r'^process_vote_(\d+)_(\d+)_(.+)$'
+    ))
+
+    # 收藏夹
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: favorites_handlers.my_favorites(u, c, page=int(c.match.group(1))),
+        pattern=r'^my_favorites_(\d+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: favorites_handlers.add_favorite(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
+        pattern=r'^add_favorite_(\d+)_(.+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: favorites_handlers.remove_favorite(u, c, target_pkid=int(c.match.group(1)), target_username=c.match.group(2)),
+        pattern=r'^remove_favorite_(\d+)_(.+)$'
+    ))
+
+    # 排行榜
+    application.add_handler(CallbackQueryHandler(leaderboard_handlers.show_leaderboard_menu, pattern=r'^leaderboard_menu$'))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: leaderboard_handlers.get_leaderboard_page(u, c, leaderboard_type=c.match.group(1), page=int(c.match.group(2))),
+        pattern=r'^leaderboard_(recommend|block|score|popularity)_(\d+)$'
+    ))
+
+    # 统计
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: utils_handlers.show_user_stats(u, c, target_pkid=int(c.match.group(1)), page=int(c.match.group(2)), target_username=c.match.group(3)),
+        pattern=r'^stats_user_(\d+)_(\d+)_(.+)$'
+    ))
+    
+    # 管理员
+    application.add_handler(CallbackQueryHandler(admin_handlers.admin_panel, pattern=r'^admin_panel$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.add_admin, pattern=r'^admin_add$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.manage_tags, pattern=r'^admin_tags$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.leaderboard_panel, pattern=r'^admin_leaderboard$'))
+    application.add_handler(CallbackQueryHandler(leaderboard_handlers.clear_leaderboard_cache, pattern=r'^admin_clear_lb_cache$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.membership_settings, pattern=r'^admin_membership$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.set_invite_link, pattern=r'^admin_set_link$'))
+    application.add_handler(CallbackQueryHandler(admin_handlers.clear_membership_settings, pattern=r'^admin_clear_membership$'))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: admin_handlers.add_tag(u, c, tag_type=c.match.group(1)),
+        pattern=r'^admin_add_tag_(recommend|block)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: admin_handlers.remove_admin_menu(u, c, page=int(c.match.group(1))),
+        pattern=r'^admin_remove_menu_(\d+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: admin_handlers.confirm_remove_admin(u, c, user_pkid_to_remove=int(c.match.group(1))),
+        pattern=r'^admin_remove_confirm_(\d+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: admin_handlers.remove_tag_menu(u, c, tag_type=c.match.group(1), page=int(c.match.group(2))),
+        pattern=r'^admin_remove_tag_menu_(recommend|block)_(\d+)$'
+    ))
+    application.add_handler(CallbackQueryHandler(
+        lambda u, c: admin_handlers.confirm_remove_tag(u, c, tag_pkid=int(c.match.group(1))),
+        pattern=r'^admin_remove_tag_confirm_(\d+)$'
+    ))
     
     # --- 启动 ---
     async with application:
