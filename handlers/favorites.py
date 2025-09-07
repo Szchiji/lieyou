@@ -4,20 +4,20 @@ from telegram.ext import ContextTypes
 from math import ceil
 from telegram.constants import ParseMode
 
-# 导入新的用户处理函数和声誉卡片函数
 from database import get_or_create_user, db_execute, db_fetch_all
 from handlers.reputation import send_reputation_card
+from handlers.utils import membership_required # <-- 导入我们的检查器
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
 
+@membership_required # <-- 贴上标签
 async def add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str):
     """将一个目标添加到用户的收藏夹。"""
     query = update.callback_query
     
     try:
-        # 获取操作者信息，如果操作者没有用户名，会抛出 ValueError
         from_user = await get_or_create_user(query.from_user)
     except ValueError as e:
         await query.answer(f"❌ 操作失败: {e}", show_alert=True)
@@ -37,10 +37,10 @@ async def add_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, targe
         logger.error(f"添加收藏失败: {e}", exc_info=True)
         await query.answer("❌ 添加收藏失败。", show_alert=True)
 
-    # 操作完成后，刷新声誉卡片
     await send_reputation_card(update, context, target_user_pkid, origin)
 
 
+@membership_required # <-- 贴上标签
 async def remove_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_pkid: int, origin: str):
     """从用户的收藏夹中移除一个目标。"""
     query = update.callback_query
@@ -61,14 +61,14 @@ async def remove_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE, ta
         logger.error(f"移除收藏失败: {e}", exc_info=True)
         await query.answer("❌ 取消收藏失败。", show_alert=True)
 
-    # 如果是从收藏列表里移除，则刷新收藏列表
     if origin and origin.startswith("fav_"):
         page = int(origin.split('_')[1])
         await my_favorites(update, context, page)
-    else: # 否则，刷新声誉卡片
+    else: 
         await send_reputation_card(update, context, target_user_pkid, origin)
 
 
+@membership_required # <-- 贴上标签
 async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 1):
     """显示用户的收藏列表。"""
     query = update.callback_query
@@ -76,7 +76,6 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     try:
         user = await get_or_create_user(query.from_user)
     except ValueError as e:
-        # 如果用户没有用户名，明确提示
         await query.answer(f"❌ 操作失败: {e}", show_alert=True)
         await query.message.edit_text(f"❌ 操作失败: {e}\n\n你需要设置一个Telegram用户名才能使用收藏功能。")
         return
@@ -103,9 +102,7 @@ async def my_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE, page:
     
     keyboard = []
     for fav in favorites_on_page:
-        # 'origin' 告诉声誉卡片，当返回时应该回到收藏列表的哪一页
         origin = f"fav_{page}"
-        # 对用户名中的特殊字符进行转义
         safe_username = fav['username'].replace('_', '\\_').replace('*', '\\*')
         keyboard.append([
             InlineKeyboardButton(f"@{safe_username}", callback_data=f"back_to_rep_card_{fav['pkid']}_{origin}")
