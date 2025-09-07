@@ -2,6 +2,9 @@ import logging
 import os
 import re
 from functools import wraps
+import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
@@ -11,10 +14,26 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import database
 from database import get_or_create_user, get_or_create_target, is_admin, db_fetch_all, db_fetch_one, db_execute, db_fetch_val, is_favorited
 
-# --- 初始化 (完整) ---
+# --- 初始化 ---
 load_dotenv()
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- 伪装网站，用于应付 Render 的端口检查 ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_health_check_server():
+    # Render 会自动注入 PORT 环境变量，通常是 10000
+    port = int(os.environ.get("PORT", 10000))
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"正在端口 {port} 上启动健康检查服务器...")
+    httpd.serve_forever()
 
 # --- 权限装饰器 (完整) ---
 def admin_required(func):
@@ -56,10 +75,9 @@ async def show_private_main_menu(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("此功能仅限私聊使用。")
         return
     user = update.effective_user
-    # --- 恢复“我的收藏”入口 ---
     keyboard = [
         [InlineKeyboardButton("🏆 排行榜", callback_data="show_leaderboard_main")],
-        [InlineKeyboardButton("❤️ 我的收藏", callback_data="show_favorites:0")] # 0是页码
+        [InlineKeyboardButton("❤️ 我的收藏", callback_data="show_favorites:0")]
     ]
     if await is_admin(user.id):
         keyboard.append([InlineKeyboardButton("⚙️ 管理员面板", callback_data="admin_panel")])
@@ -79,114 +97,50 @@ async def show_leaderboard_handler(update: Update, context: ContextTypes.DEFAULT
 
 # --- 收藏夹功能 (完整实现) ---
 async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    user_record = await get_or_create_user(user)
-    user_pkid = user_record['pkid']
-    
-    _, page_str = query.data.split(':')
-    page = int(page_str)
-    limit = 5 # 每页显示5个
-    offset = page * limit
-
-    favorites = await db_fetch_all(
-        """SELECT u.pkid, u.username FROM favorites f JOIN users u ON f.target_user_pkid = u.pkid
-           WHERE f.user_pkid = $1 ORDER BY f.created_at DESC LIMIT $2 OFFSET $3""",
-        user_pkid, limit, offset
-    )
+    query = update.callback_query; await query.answer(); user_record = await get_or_create_user(query.from_user); user_pkid = user_record['pkid']
+    _, page_str = query.data.split(':'); page = int(page_str); limit = 5; offset = page * limit
+    favorites = await db_fetch_all("""SELECT u.pkid, u.username FROM favorites f JOIN users u ON f.target_user_pkid = u.pkid WHERE f.user_pkid = $1 ORDER BY f.created_at DESC LIMIT $2 OFFSET $3""", user_pkid, limit, offset)
     total_count = await db_fetch_val("SELECT COUNT(*) FROM favorites WHERE user_pkid = $1", user_pkid)
-
     if not favorites and page == 0:
-        await query.edit_message_text("您的收藏夹是空的。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« 返回主菜单", callback_data="show_private_main_menu")]]))
-        return
-
+        await query.edit_message_text("您的收藏夹是空的。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« 返回主菜单", callback_data="show_private_main_menu")]])); return
     keyboard = []
-    for fav in favorites:
-        keyboard.append([
-            InlineKeyboardButton(f"@{fav['username']}", callback_data=f"user_details:{fav['pkid']}"), # 占位，点击可看详情
-            InlineKeyboardButton("❌ 移除", callback_data=f"remove_favorite:{fav['pkid']}:{page}")
-        ])
-
-    # 分页按钮
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"show_favorites:{page-1}"))
-    if (page + 1) * limit < total_count:
-        nav_row.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"show_favorites:{page+1}"))
-    if nav_row:
-        keyboard.append(nav_row)
-        
-    keyboard.append([InlineKeyboardButton("« 返回主菜单", callback_data="show_private_main_menu")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"❤️ **我的收藏** (第 {page+1} 页 / 共 {((total_count-1)//limit)+1} 页)", reply_markup=reply_markup, parse_mode='Markdown')
+    for fav in favorites: keyboard.append([InlineKeyboardButton(f"@{fav['username']}", callback_data=f"noop"), InlineKeyboardButton("❌ 移除", callback_data=f"remove_favorite:{fav['pkid']}:{page}")])
+    nav_row = [];
+    if page > 0: nav_row.append(InlineKeyboardButton("⬅️ 上一页", callback_data=f"show_favorites:{page-1}"))
+    if (page + 1) * limit < total_count: nav_row.append(InlineKeyboardButton("下一页 ➡️", callback_data=f"show_favorites:{page+1}"))
+    if nav_row: keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("« 返回主菜单", callback_data="show_private_main_menu")]); reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(f"❤️ **我的收藏** (第 {page+1} 页)", reply_markup=reply_markup, parse_mode='Markdown')
 
 async def toggle_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    _, target_pkid_str = query.data.split(':')
-    target_pkid = int(target_pkid_str)
-    user_record = await get_or_create_user(query.from_user)
-    user_pkid = user_record['pkid']
-
-    is_fav = await is_favorited(user_pkid, target_pkid)
-    target_username = await db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_pkid)
-    
-    if is_fav:
-        await db_execute("DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2", user_pkid, target_pkid)
-        await query.answer(f"已将 @{target_username} 移出收藏。")
-    else:
-        await db_execute("INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_pkid, target_pkid)
-        await query.answer(f"已将 @{target_username} 加入收藏！")
-    
-    # 刷新评价后的消息按钮
-    is_fav_after = not is_fav
-    fav_button_text = "💔 取消收藏" if is_fav_after else "❤️ 添加收藏"
-    new_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(fav_button_text, callback_data=f"toggle_favorite:{target_pkid}")]])
+    query = update.callback_query; await query.answer(); _, target_pkid_str = query.data.split(':'); target_pkid = int(target_pkid_str); user_record = await get_or_create_user(query.from_user); user_pkid = user_record['pkid']
+    is_fav = await is_favorited(user_pkid, target_pkid); target_username = await db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_pkid)
+    if is_fav: await db_execute("DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2", user_pkid, target_pkid); await query.answer(f"已将 @{target_username} 移出收藏。")
+    else: await db_execute("INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING", user_pkid, target_pkid); await query.answer(f"已将 @{target_username} 加入收藏！")
+    is_fav_after = not is_fav; fav_button_text = "💔 取消收藏" if is_fav_after else "❤️ 添加收藏"; new_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(fav_button_text, callback_data=f"toggle_favorite:{target_pkid}")]])
     await query.edit_message_reply_markup(reply_markup=new_keyboard)
 
 async def remove_favorite_from_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    _, target_pkid_str, page_str = query.data.split(':')
-    target_pkid = int(target_pkid_str)
-    user_record = await get_or_create_user(query.from_user)
-    user_pkid = user_record['pkid']
-
+    query = update.callback_query; await query.answer(); _, target_pkid_str, page_str = query.data.split(':'); target_pkid = int(target_pkid_str); user_record = await get_or_create_user(query.from_user); user_pkid = user_record['pkid']
     await db_execute("DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2", user_pkid, target_pkid)
-    await query.answer("已移出收藏。")
-    
-    # 刷新收藏夹列表
-    query.data = f"show_favorites:{page_str}"
-    await show_favorites(update, context)
+    query.data = f"show_favorites:{page_str}"; await show_favorites(update, context)
 
-# --- 核心评价流程 (修改以支持收藏) ---
+# --- 核心评价流程 (完整) ---
 async def process_vote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    _, vote_type, tag_pkid_str, target_pkid_str = query.data.split(':')
-    tag_pkid, target_pkid = int(tag_pkid_str), int(target_pkid_str)
-    if query.from_user.id != query.message.reply_to_message.from_user.id:
-        await query.answer("❌ 非本人操作", show_alert=True); return
+    query = update.callback_query; await query.answer(); _, vote_type, tag_pkid_str, target_pkid_str = query.data.split(':'); tag_pkid, target_pkid = int(tag_pkid_str), int(target_pkid_str)
+    if query.from_user.id != query.message.reply_to_message.from_user.id: await query.answer("❌ 非本人操作", show_alert=True); return
     try:
         user_pkid = (await get_or_create_user(query.from_user))['pkid']
-        if user_pkid == target_pkid:
-            await query.edit_message_text("❌ 您不能评价自己。"); return
+        if user_pkid == target_pkid: await query.edit_message_text("❌ 您不能评价自己。"); return
         await db_execute("INSERT INTO evaluations (user_pkid, target_user_pkid, tag_pkid, type) VALUES ($1, $2, $3, $4) ON CONFLICT (user_pkid, target_user_pkid, tag_pkid) DO UPDATE SET type = EXCLUDED.type", user_pkid, target_pkid, tag_pkid, vote_type)
-        tag_name = await db_fetch_val("SELECT name FROM tags WHERE pkid = $1", tag_pkid)
-        target_username = await db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_pkid)
-        vote_action_text = "推荐" if vote_type == "recommend" else "警告"
-        
-        # --- 增加收藏按钮 ---
-        is_fav = await is_favorited(user_pkid, target_pkid)
-        fav_button_text = "💔 取消收藏" if is_fav else "❤️ 添加收藏"
-        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(fav_button_text, callback_data=f"toggle_favorite:{target_pkid}")]])
-        
+        tag_name = await db_fetch_val("SELECT name FROM tags WHERE pkid = $1", tag_pkid); target_username = await db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_pkid); vote_action_text = "推荐" if vote_type == "recommend" else "警告"
+        is_fav = await is_favorited(user_pkid, target_pkid); fav_button_text = "💔 取消收藏" if is_fav else "❤️ 添加收藏"; reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(fav_button_text, callback_data=f"toggle_favorite:{target_pkid}")]])
         await query.edit_message_text(f"✅ 您已成功将 @{target_username} 标记为 **{tag_name}** ({vote_action_text})。", reply_markup=reply_markup, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"处理投票时出错: {e}", exc_info=True)
-        await query.edit_message_text("❌ 处理投票时发生数据库错误。")
+    except Exception as e: logger.error(f"处理投票时出错: {e}", exc_info=True); await query.edit_message_text("❌ 处理投票时发生数据库错误。")
 
-# ... 其他函数 (handle_mention_evaluation, ask_for_tags, etc.) 保持完整 ...
+# ... 其他函数保持完整 ...
 async def handle_mention_evaluation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user; message_text = update.message.text.strip(); match = re.fullmatch(r'@(\w+)', message_text)
+    user = update.effective_user; message_text = update.message.text.strip(); match = re.fullmatch(r'@(\w+)', message_text);
     if not match: return
     target_username = match.group(1)
     try: await get_or_create_user(user); target_user = await get_or_create_target(target_username)
@@ -232,23 +186,25 @@ async def admin_toggle_menu_status(update: Update, context: ContextTypes.DEFAULT
     await db_execute("UPDATE menu_buttons SET is_enabled = $1 WHERE id = $2", not current_status, button_id); await admin_manage_menu(update, context)
 async def noop(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.callback_query.answer()
 
-# --- 主程序入口 (完整) ---
-async def post_init(app: Application): await database.init_db(); logger.info("数据库初始化完成。")
-def main() -> None:
+# --- 主程序入口 (最终进化版) ---
+async def post_init(app: Application):
+    await database.init_db()
+    logger.info("数据库初始化完成。")
+
+async def main_async():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token: raise ValueError("请设置 TELEGRAM_TOKEN 环境变量")
+
     application = ApplicationBuilder().token(token).post_init(post_init).build()
-    # 命令处理器
+
+    # 添加所有处理器...
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("bang", show_leaderboard_handler))
-    # 底部按钮文本和自然语言处理器
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^🚀 主菜单$'), show_private_main_menu))
     application.add_handler(MessageHandler(filters.TEXT & (filters.Regex(r'^🏆 排行榜$') | filters.Regex(r'^排行榜$')), show_leaderboard_handler))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^ℹ️ 帮助$'), help_command))
-    # 核心评价流程处理器
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^@(\w+)$'), handle_mention_evaluation))
-    # 回调查询处理器
     application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
     application.add_handler(CallbackQueryHandler(show_leaderboard_handler, pattern=r'^show_leaderboard_main$'))
     application.add_handler(CallbackQueryHandler(noop, pattern=r'^noop$'))
@@ -259,13 +215,17 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(admin_panel, pattern=r'^admin_panel$'))
     application.add_handler(CallbackQueryHandler(admin_manage_menu, pattern=r'^admin_menu_buttons$'))
     application.add_handler(CallbackQueryHandler(admin_toggle_menu_status, pattern=r'^admin_toggle_menu:'))
-    # --- 新增收藏夹处理器 ---
     application.add_handler(CallbackQueryHandler(show_favorites, pattern=r'^show_favorites:'))
     application.add_handler(CallbackQueryHandler(toggle_favorite, pattern=r'^toggle_favorite:'))
     application.add_handler(CallbackQueryHandler(remove_favorite_from_list, pattern=r'^remove_favorite:'))
     
-    logger.info("机器人正在启动...")
-    application.run_polling(drop_pending_updates=True)
+    logger.info("机器人正在启动 polling...")
+    await application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
-    main()
+    # 启动健康检查服务器在一个单独的线程中
+    health_thread = threading.Thread(target=run_health_check_server, daemon=True)
+    health_thread.start()
+
+    # 在主线程中运行异步的机器人
+    asyncio.run(main_async())
