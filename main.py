@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 load_dotenv()
 
 # 导入数据库初始化函数
-from database import init_db
+from database import init_db, pool as db_pool
 
 # --- 导入处理程序模块 ---
 import bot_handlers.start
@@ -40,8 +40,22 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """记录错误。"""
     logger.error("Exception while handling an update:", exc_info=context.error)
 
-async def main() -> None:
-    """配置并启动机器人。"""
+async def post_init(application: Application) -> None:
+    """在应用启动后，初始化数据库。"""
+    logger.info("应用程序 post_init: 正在初始化数据库...")
+    await init_db()
+    logger.info("数据库初始化完成。")
+
+async def post_shutdown(application: Application) -> None:
+    """在应用关闭前，关闭数据库连接池。"""
+    global db_pool
+    if db_pool:
+        logger.info("应用程序 post_shutdown: 正在关闭数据库连接池...")
+        await db_pool.close()
+        logger.info("数据库连接池已关闭。")
+
+def main() -> None:
+    """配置并启动机器人。这个函数不再是 async。"""
     logger.info("程序开始启动...")
     
     # --- 环境变量 ---
@@ -53,13 +67,15 @@ async def main() -> None:
     render_url = os.environ.get("RENDER_EXTERNAL_URL")
     port = int(os.environ.get("PORT", 8443))
 
-    # --- 初始化 ---
-    await init_db()
+    # 使用 post_init 和 post_shutdown 来安全地管理数据库生命周期
+    builder = Application.builder().token(telegram_token)
+    builder.post_init(post_init)
+    builder.post_shutdown(post_shutdown)
     
-    # 1. 正确的流程：先构建好 Application 对象
-    application = Application.builder().token(telegram_token).build()
+    # 1. 构建 Application
+    application = builder.build()
     
-    # 2. 然后在构建好的 application 对象上添加处理程序
+    # 2. 添加处理程序
     application.add_handler(CommandHandler("start", bot_handlers.start.start))
     application.add_handler(CommandHandler("help", bot_handlers.start.help_command))
     application.add_handler(CommandHandler("admin", bot_handlers.admin.admin_panel))
@@ -102,46 +118,23 @@ async def main() -> None:
     
     # --- 启动模式 ---
     if render_url:
-        # --- Webhook 模式 (用于 Render) ---
+        # Webhook 模式: 将所有控制权交给 application.run_webhook
         webhook_path = f"/{telegram_token}"
         webhook_url = f"{render_url}{webhook_path}"
         
-        await application.run_webhook(
+        logger.info(f"将以 Webhook 模式启动，监听 0.0.0.0:{port}")
+        application.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=webhook_path,
             webhook_url=webhook_url,
             allowed_updates=Update.ALL_TYPES
         )
-        logger.info(f"Webhook 服务器已在 0.0.0.0:{port} 上启动，并开始接收更新。")
-
     else:
-        # --- 轮询模式 (用于本地开发) ---
-        logger.info("未检测到 RENDER_EXTERNAL_URL，将使用轮询模式启动。")
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info("应用程序已在轮询模式下启动。")
+        # 轮询模式: 将所有控制权交给 application.run_polling
+        logger.info("将以轮询模式启动。")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    # 使用 try...finally 来确保数据库连接池被关闭
-    pool = None
-    try:
-        # 我们在这里启动主循环
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("程序被手动中断。")
-    except Exception as e:
-        logger.critical(f"程序因未捕获的异常而崩溃: {e}", exc_info=True)
-    finally:
-        # 在程序退出前关闭数据库连接池
-        if pool:
-            try:
-                # 这个关闭也需要在一个事件循环中运行
-                # 我们获取当前可能存在的循环，或者创建一个新的来运行它
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(pool.close())
-                else:
-                    loop.run_until_complete(pool.close())
-                logger.info("数据库连接池已关闭。")
-            except Exception as e:
-                logger.error(f"关闭数据库连接池时出错: {e}")
+    main()
