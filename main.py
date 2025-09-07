@@ -51,12 +51,16 @@ async def main():
                 # Tag Management
                 CallbackQueryHandler(manage_tags_panel, pattern=r'^admin_manage_tags$'),
                 CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_'),
-                # Menu Management (placeholder)
+                # Menu Management (NOW FULLY IMPLEMENTED)
                 CallbackQueryHandler(manage_menu_buttons_panel, pattern=r'^admin_menu_buttons$'),
+                CallbackQueryHandler(delete_menu_button_callback, pattern=r'^delete_menu_'),
+                CallbackQueryHandler(toggle_menu_button_callback, pattern=r'^toggle_menu_'),
+                CallbackQueryHandler(reorder_menu_button_callback, pattern=r'^reorder_menu_'),
                 # User Management
                 CallbackQueryHandler(user_management_panel, pattern=r'^admin_user_management$'),
                 # Sub-conversations (entry points)
                 CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$'),
+                CallbackQueryHandler(add_menu_button_prompt, pattern=r'^admin_add_menu_button_prompt$'), # New entry point
                 CallbackQueryHandler(prompt_for_username, pattern=r'^admin_hide_user_prompt$'),
                 CallbackQueryHandler(prompt_for_username, pattern=r'^admin_unhide_user_prompt$'),
                 CallbackQueryHandler(prompt_for_broadcast, pattern=r'^admin_broadcast$'),
@@ -65,6 +69,9 @@ async def main():
             TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
             SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern=r'^tag_type_')],
             
+            TYPING_BUTTON_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_menu_button_name)],
+            SELECTING_BUTTON_ACTION: [CallbackQueryHandler(handle_new_menu_button_action, pattern=r'^action_')],
+
             TYPING_USERNAME_TO_HIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
             TYPING_USERNAME_TO_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
             
