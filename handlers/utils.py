@@ -22,7 +22,7 @@ async def send_membership_error(update: Update):
         ]])
 
     if update.callback_query:
-        # 对按钮点击做出回应，并发送新消息或编辑原消息
+        # 对按钮点击做出回应
         await update.callback_query.answer("您需要先加入官方群组。", show_alert=True)
         # 尝试编辑消息，如果失败（例如消息太旧），则发送新消息
         try:
@@ -57,16 +57,18 @@ def membership_required(func):
                 return await func(update, context, *args, **kwargs)
             else:
                 # 用户状态不合格（例如 'left' 或 'kicked'）
+                logger.warning(f"用户 {update.effective_user.id} 尝试操作但因成员状态 '{member.status}' 被拒绝。")
                 await send_membership_error(update)
                 return
         except BadRequest as e:
             # 如果机器人不在该群组，或群组ID错误，或用户不存在
             logger.error(f"检查群成员资格时出错 (chat_id: {chat_id_str}): {e}")
-            if "Chat not found" in str(e):
-                 # 可以选择通知管理员，chat_id 设置错误
-                 pass
-            # 向用户发送通用错误，但不暴露内部信息
-            await send_membership_error(update)
+            if "Chat not found" in str(e) or "user not found" in str(e):
+                 # 向用户发送通用错误，但不暴露内部信息
+                 await send_membership_error(update)
+            else:
+                 # 其他 BadRequest 可能意味着机器人被踢出等
+                 await send_membership_error(update)
             return
         except Exception as e:
             logger.error(f"检查群成员资格时发生未知错误: {e}")
