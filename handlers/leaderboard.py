@@ -1,18 +1,19 @@
 import logging
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes,-
+from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from math import ceil
 
-from database import db_fetch_all, get_setting, set_setting, is_admin
-from handlers.utils import membership_required # <-- 导入我们的检查器
+from database import db_fetch_all, is_admin
+from handlers.utils import membership_required
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 10
 CACHE_SECONDS = 300  # 5分钟缓存
 
-async def get_leaderboard_data(leaderboard_type: str):
+async def get_leaderboard_data(context: ContextTypes.DEFAULT_TYPE, leaderboard_type: str):
     """从数据库获取并缓存排行榜数据。"""
     cache_key = f"leaderboard_{leaderboard_type}"
     cached_data = context.bot_data.get(cache_key)
@@ -70,12 +71,12 @@ async def get_leaderboard_data(leaderboard_type: str):
     context.bot_data[cache_key] = {'data': data, 'timestamp': datetime.now()}
     return data
 
-@membership_required # <-- 贴上标签
+@membership_required
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """响应 /bang 命令，显示排行榜主菜单。"""
     await show_leaderboard_menu(update, context)
 
-@membership_required # <-- 贴上标签
+@membership_required
 async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示排行榜类型的选择菜单。"""
     text = "🏆 **排行榜**\n\n请选择您想查看的榜单："
@@ -97,13 +98,13 @@ async def show_leaderboard_menu(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text(text, reply_markup=reply_markup)
 
-@membership_required # <-- 贴上标签
+@membership_required
 async def get_leaderboard_page(update: Update, context: ContextTypes.DEFAULT_TYPE, leaderboard_type: str, page: int):
     """显示特定类型排行榜的某一页。"""
     query = update.callback_query
     await query.answer()
 
-    data = await get_leaderboard_data(leaderboard_type)
+    data = await get_leaderboard_data(context, leaderboard_type)
 
     if not data:
         await query.edit_message_text("此榜单暂时没有数据哦。", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回榜单选择", callback_data="leaderboard_menu")]]))
