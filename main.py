@@ -48,23 +48,26 @@ async def main():
 
     application = Application.builder().token(token).build()
 
-    # --- 注册处理器 (使用正则表达式精确匹配) ---
+    # --- 注册处理器 ---
     
     # 1. 命令处理器
+    # 这些命令现在是用户与机器人在群组中互动的主要入口。
+    # 它们内部已经包含了区分群聊和私聊的逻辑。
     application.add_handler(CommandHandler("start", help_handlers.send_help_message))
     application.add_handler(CommandHandler("bang", leaderboard_handlers.leaderboard_command))
     application.add_handler(CommandHandler("admin", admin_handlers.admin_panel))
     application.add_handler(CommandHandler("myfav", favorites_handlers.my_favorites))
 
     # 2. 消息处理器
-    # - 处理私聊中的文本，用于管理员输入
+    # - 处理私聊中的文本，用于管理员输入（如添加标签、设置邀请链接等）
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, admin_handlers.handle_private_message))
-    # - 处理转发消息，用于绑定群组
+    # - 处理私聊中的转发消息，用于管理员绑定强制入群的群组
     application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, admin_handlers.handle_private_message))
-    # - 处理 @username 查询
+    # - 处理群聊和私聊中的 @username 查询，这是核心的声誉查询功能
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'@(\w+)'), reputation_handlers.handle_query))
     
-    # 3. 回调查询处理器 (精确匹配，不再使用脆弱的调度器)
+    # 3. 回调查询处理器
+    # 使用正则表达式精确匹配您设计的回调数据格式，确保每个按钮都能正确触发对应功能。
     
     # 导航
     application.add_handler(CallbackQueryHandler(help_handlers.send_help_message, pattern=r'^back_to_help$'))
@@ -104,7 +107,7 @@ async def main():
         pattern=r'^leaderboard_(recommend|block|score|popularity)_(\d+)$'
     ))
 
-    # 统计
+    # 统计 (假设存在于 utils.py)
     application.add_handler(CallbackQueryHandler(
         lambda u, c: utils_handlers.show_user_stats(u, c, target_pkid=int(c.match.group(1)), page=int(c.match.group(2)), target_username=c.match.group(3)),
         pattern=r'^stats_user_(\d+)_(\d+)_(.+)$'
