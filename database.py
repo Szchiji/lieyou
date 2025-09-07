@@ -159,9 +159,13 @@ async def db_execute(query, *params):
 
 # --- User specific functions ---
 async def get_or_create_user(user_data: dict) -> int:
-    """Gets a user by their Telegram ID, creating them if they don't exist."""
+    """
+    Gets a user by their Telegram ID, creating them if they don't exist.
+    This is the unified and safer function.
+    """
     user_id = user_data.id
-    username = user_data.username
+    # Ensure username is not None, which can happen for users with privacy settings
+    username = user_data.username if user_data.username else f"user_{user_id}"
     first_name = user_data.first_name
     
     # Check if user exists
@@ -177,14 +181,11 @@ async def get_or_create_user(user_data: dict) -> int:
     else:
         # Create user if they don't exist
         # Check if this user should be an admin
-        admin_user_ids = os.getenv("ADMIN_USER_IDS", "").split(',')
+        admin_user_ids_str = os.getenv("ADMIN_USER_IDS", "")
+        admin_user_ids = [admin_id.strip() for admin_id in admin_user_ids_str.split(',') if admin_id.strip()]
         is_admin = str(user_id) in admin_user_ids
 
         return await db_fetch_val(
             "INSERT INTO users (id, username, first_name, is_admin) VALUES ($1, $2, $3, $4) RETURNING pkid",
             user_id, username, first_name, is_admin
         )
-
-# Note: The original `save_user` function was replaced by a more robust `get_or_create_user`.
-# The logic in `save_user` had some issues with how it handled admin status on updates.
-# This new function is safer and more aligned with the bot's likely needs.
