@@ -36,7 +36,6 @@ async def main():
     application = Application.builder().token(bot_token).build()
 
     # --- Conversation Handler for Admin Panel ---
-    # This handler manages multi-step interactions, like adding a new tag.
     admin_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(admin_panel, pattern='^admin_panel$'),
@@ -60,7 +59,6 @@ async def main():
             CommandHandler('cancel', cancel_action)
         ],
         map_to_parent={
-            # Return to main admin panel after conversation ends
             0: 0,
             ConversationHandler.END: ConversationHandler.END
         }
@@ -68,10 +66,11 @@ async def main():
 
     # --- Handlers ---
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(admin_conv) # Add the entire conversation flow
+    application.add_handler(admin_conv)
     application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_\d+$'))
     application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_(up|down)'))
-    application.add_handler(CallbackQuery_handler(tag_callback_handler, pattern=r'^tag_\d+$'))
+    # THE FIX IS HERE: Corrected CallbackQuery_handler to CallbackQueryHandler
+    application.add_handler(CallbackQueryHandler(tag_callback_handler, pattern=r'^tag_\d+$'))
     application.add_handler(CallbackQueryHandler(private_menu_callback_handler, pattern=r'^menu_'))
     application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
     application.add_handler(CallbackQueryHandler(leaderboard_type_callback_handler, pattern=r'^leaderboard_'))
@@ -80,33 +79,27 @@ async def main():
     # --- Run the Bot ---
     logger.info("Bot is starting...")
     
-    # The `async with` block handles startup and shutdown gracefully.
     try:
         async with application:
-            # Start background tasks
-            application.create_task(run_suspicion_monitor()) # FIX 1: Removed the argument
+            application.create_task(run_suspicion_monitor())
             
-            # Start polling
             await application.initialize()
             await application.start()
             await application.updater.start_polling()
             logger.info("Bot has started polling successfully.")
             
-            # Keep the application running
-            while True:
-                await asyncio.sleep(3600)
+            # Keep the application running indefinitely
+            await asyncio.Event().wait()
 
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown requested (KeyboardInterrupt/SystemExit).")
+        logger.info("Bot shutdown requested.")
     except Exception as e:
-        logger.error(f"An unhandled exception occurred: {e}", exc_info=True)
+        logger.error(f"An unhandled exception occurred in main run loop: {e}", exc_info=True)
     finally:
-        # FIX 2: Simplified shutdown logic compatible with new library versions
+        logger.info("Bot shutdown sequence initiated.")
         if application and application.updater and application.updater.is_polling():
-            logger.info("Stopping polling...")
             await application.updater.stop()
         if application:
-            logger.info("Shutting down application...")
             await application.shutdown()
         logger.info("Bot has been shut down.")
 
@@ -115,4 +108,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except Exception as e:
-        logger.critical(f"Failed to run the bot: {e}", exc_info=True)
+        logger.critical(f"Failed to run the bot at the top level: {e}", exc_info=True)
