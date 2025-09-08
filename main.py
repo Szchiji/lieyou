@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from telegram import Update, MessageEntity
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters
+    ConversationHandler, ContextTypes, filters
 )
 
 from bot_handlers.start import start
@@ -29,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("bot")
 
-async def error_handler(update: Update, context):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
     try:
         if update and update.effective_message:
@@ -40,39 +40,37 @@ async def error_handler(update: Update, context):
 async def post_init(app: Application):
     await init_db()
     asyncio.create_task(run_suspicion_monitor(app.bot))
-    logger.info("Bot initialized")
+    logger.info("Bot initialized (webhook mode)")
 
 async def post_shutdown(app: Application):
     await close_db()
     logger.info("Bot shutdown complete")
 
-async def myreport_cmd(update: Update, context):
+async def myreport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await generate_my_report(update, context)
 
-async def admin_cmd(update: Update, context):
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await admin_panel(update, context)
 
-async def leaderboard_cmd(update: Update, context):
+async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_leaderboard(update, context)
 
-async def query_cmd(update: Update, context):
+async def query_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("用法：/query @用户名")
         return
     username = context.args[0].lstrip('@')
-    # 构造一个 @mention 解析
     fake_text = f"@{username}"
     update.message.text = fake_text
     update.message.entities = [MessageEntity(type=MessageEntity.MENTION, offset=0, length=len(fake_text))]
     await handle_any_mention(update, context)
 
-async def fallback_text_private(update: Update, context):
+async def fallback_text_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_private_main_menu(update, context)
 
-async def track_user_activity(update: Update, context):
+async def track_user_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and update.effective_user.id > 0:
         await save_user(update.effective_user)
-        # 尝试升级虚拟
         try:
             await promote_virtual_user(update.effective_user)
         except Exception as e:
@@ -83,6 +81,23 @@ def main():
     if not token:
         raise RuntimeError("BOT_TOKEN missing")
 
+    # Webhook 配置
+    # Render Web Service 会注入 PORT 和 RENDER_EXTERNAL_URL（也可自定义 WEBHOOK_BASE_URL）
+    port = int(os.getenv("PORT", "10000"))
+    base_url = os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL")
+    if not base_url:
+        raise RuntimeError("WEBHOOK_BASE_URL or RENDER_EXTERNAL_URL is required for webhook deployment")
+    # 确保 base_url 末尾无斜杠
+    if base_url.endswith('/'):
+        base_url = base_url[:-1]
+    # 路径可自定义（建议随机路径），默认使用 /webhook/<前8位token>
+    default_path = f"/webhook/{token[:8]}"
+    url_path = os.getenv("WEBHOOK_PATH", default_path)
+    if not url_path.startswith('/'):
+        url_path = '/' + url_path
+    webhook_url = f"{base_url}{url_path}"
+    secret_token = os.getenv("SECRET_TOKEN", "")
+
     app = (
         Application.builder()
         .token(token)
@@ -91,6 +106,7 @@ def main():
         .build()
     )
 
+    # 全局错误
     app.add_error_handler(error_handler)
 
     # 用户追踪
@@ -132,11 +148,17 @@ def main():
     admin_conv = build_admin_conversations()
     app.add_handler(admin_conv)
 
-    # 私聊兜底
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT, fallback_text_private))
-
-    logger.info("Bot polling start")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    logger.info(f"Starting webhook server on 0.0.0.0:{port} path={url_path} url={webhook_url}")
+    # 运行 Webhook（会自动调用 setWebhook）
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=url_path.lstrip('/'),
+        webhook_url=webhook_url,
+        secret_token=secret_token or None,
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()
