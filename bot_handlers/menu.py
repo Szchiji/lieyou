@@ -1,85 +1,90 @@
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import database
 
-# --- Predefined actions that can be assigned to buttons ---
-# The key is the action_id stored in the DB, the value is the callback_data for the handler
-AVAILABLE_ACTIONS = {
-    "show_leaderboard": "show_leaderboard_public",
-    "show_my_favorites": "show_my_favorites_private",
-    "show_help": "show_help_private",
-    "generate_my_report": "generate_my_report_private" # Example for a new action
-}
-
-async def get_main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Builds the main menu keyboard from the database."""
-    buttons = await database.db_fetch_all(
-        "SELECT name FROM menu_buttons WHERE is_active = TRUE ORDER BY sort_order ASC, name ASC"
-    )
-    keyboard = [[KeyboardButton(button['name'])] for button in buttons]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-async def show_private_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main menu in a private chat."""
-    keyboard = await get_main_menu_keyboard()
-    text = "🚀 **主菜单**\n请使用下方键盘选择一个操作："
-    
-    # Check if we are coming from a callback query (like "back to menu")
-    if update.callback_query:
-        await update.callback_query.answer()
-        # Edit the previous message to remove inline keyboard
-        await update.callback_query.edit_message_text("返回主菜单...")
-        # Then send the new menu with ReplyKeyboard
-        await update.callback_query.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
+logger = logging.getLogger(__name__)
 
 async def private_menu_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button presses from the ReplyKeyboardMarkup by mapping them to callback handlers."""
-    button_text = update.message.text
+    """Handles callbacks from the private main menu."""
+    query = update.callback_query
+    await query.answer()
     
-    # Find the action associated with the button text
-    action_id = await database.db_fetch_val(
-        "SELECT action_id FROM menu_buttons WHERE name = $1 AND is_active = TRUE",
-        button_text
-    )
-
-    if not action_id:
-        await update.message.reply_text("未知命令，请使用键盘上的按钮。")
-        return
-
-    # Get the corresponding callback_data for the action
-    callback_data = AVAILABLE_ACTIONS.get(action_id)
-
-    if not callback_data:
-        await update.message.reply_text(f"功能 '{action_id}' 尚未配置，请联系管理员。")
-        return
-
-    # To reuse existing callback handlers, we need to find the handler function.
-    # This avoids duplicating logic.
-    # We import handlers here to avoid circular dependencies at the top level.
-    from .leaderboard import show_leaderboard_callback_handler
-    from .report import generate_my_report
-    # from .favorites import show_my_favorites_handler # Example for favorites
+    action = query.data
     
-    handler_map = {
-        "show_leaderboard_public": show_leaderboard_callback_handler,
-        # "show_my_favorites_private": show_my_favorites_handler,
-        "generate_my_report_private": generate_my_report
-    }
-    
-    target_handler = handler_map.get(callback_data)
-    
-    if target_handler:
-        # For handlers expecting a CallbackQuery, we create a mock one.
-        # For handlers expecting a normal Update (like commands), we can call them directly.
-        if callback_data in ["show_leaderboard_public"]:
-             from telegram import CallbackQuery
-             mock_query = CallbackQuery(id=str(update.update_id), user=update.effective_user, chat_instance=str(update.effective_chat.id), data=callback_data, message=update.message)
-             mock_update = Update(update.update_id, mock_query)
-             await target_handler(mock_update, context)
-        else:
-            # This handler (like generate_my_report) is a normal command handler
-            await target_handler(update, context)
+    if action == 'menu_my_report':
+        # This calls the report generation function from another file
+        from .reports import generate_my_report
+        await generate_my_report(update, context)
+    elif action == 'menu_leaderboard':
+        # This calls the leaderboard handler within this same file
+        await show_leaderboard_callback_handler(update, context)
+    elif action == 'show_private_main_menu':
+        # This calls the start menu handler from start.py
+        from .start import show_private_main_menu
+        await show_private_main_menu(update, context)
     else:
-        await update.message.reply_text(f"功能 '{callback_data}' 的处理程序不存在，请联系管理员。")
+        await query.edit_message_text(f"功能 '{action}' 正在开发中。")
+
+async def show_leaderboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the leaderboard type selection menu."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("信誉分排行榜", callback_data='leaderboard_rep')],
+        # You can add other leaderboard types here in the future
+        [InlineKeyboardButton("返回主菜单", callback_data='show_private_main_menu')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message_text = "🏆 *排行榜*\n\n请选择您想查看的榜单类型："
+    
+    if query:
+        await query.edit_message_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        # This case is for when it's called not from a button press
+        await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def leaderboard_type_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches and displays the selected leaderboard."""
+    query = update.callback_query
+    await query.answer()
+    
+    board_type = query.data.split('_')[1] # e.g., 'rep'
+    
+    if board_type == 'rep':
+        try:
+            leaderboard_data = await database.db_fetch_all("""
+                SELECT u.username, SUM(re.change) as total_score
+                FROM reputation_events re
+                JOIN users u ON re.target_user_id = u.id
+                WHERE u.is_hidden = FALSE AND u.username IS NOT NULL
+                GROUP BY u.username
+                HAVING SUM(re.change) IS NOT NULL
+                ORDER BY total_score DESC
+                LIMIT 10;
+            """)
+            
+            title = "信誉分排行榜"
+            if not leaderboard_data:
+                leaderboard_text = "目前还没有人获得信誉分。"
+            else:
+                leaderboard_text = "\n".join(
+                    [f"{i+1}. @{row['username']} - {int(row['total_score'])}分" for i, row in enumerate(leaderboard_data)]
+                )
+        except Exception as e:
+            logger.error(f"Error fetching reputation leaderboard: {e}", exc_info=True)
+            leaderboard_text = "获取排行榜数据时出错。"
+            title = "错误"
+    else:
+        await query.edit_message_text("此排行榜类型暂不可用。")
+        return
+
+    full_text = f"🏆 *{title}*\n\n{leaderboard_text}"
+    
+    keyboard = [[InlineKeyboardButton("返回", callback_data='menu_leaderboard')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(full_text, reply_markup=reply_markup, parse_mode='Markdown')
