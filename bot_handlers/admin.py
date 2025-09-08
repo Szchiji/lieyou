@@ -1,202 +1,131 @@
-import logging
 import os
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes, ConversationHandler
-import database
-from .menu import AVAILABLE_ACTIONS
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ContextTypes, ConversationHandler, CallbackQueryHandler,
+    MessageHandler, CommandHandler, filters
+)
+from database import list_tags, toggle_tag, delete_tag, add_tag, set_user_hidden_by_username, get_bot_statistics
 
 logger = logging.getLogger(__name__)
+ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID","0"))
 
-# --- Conversation States ---
-(
-    TYPING_TAG_NAME, SELECTING_TAG_TYPE,
-    TYPING_BUTTON_NAME, SELECTING_BUTTON_ACTION,
-    TYPING_USERNAME_TO_HIDE, TYPING_USERNAME_TO_UNHIDE
-) = range(6)
+TYPING_TAG_NAME = 1001
+SELECTING_TAG_TYPE = 1002
+TYPING_USERNAME_HIDE = 1003
+TYPING_USERNAME_UNHIDE = 1004
 
-# --- Admin Check ---
-async def check_admin(update: Update) -> bool:
-    """Checks if the user is an admin."""
-    user = update.effective_user
-    is_admin = await database.db_fetch_val("SELECT is_admin FROM users WHERE id = $1", user.id)
-    if not is_admin:
-        if update.callback_query:
-            await update.callback_query.answer("您没有权限执行此操作。", show_alert=True)
-        else:
-            await update.message.reply_text("您没有权限执行此操作。")
-        return False
-    return True
-
-# --- Main Admin Panel ---
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the main admin panel."""
-    if not await check_admin(update): return
-    
-    keyboard = [
-        [InlineKeyboardButton("✏️ 管理标签", callback_data="admin_manage_tags")],
-        [InlineKeyboardButton("🔧 管理底部按钮", callback_data="admin_menu_buttons")],
-        [InlineKeyboardButton("👤 用户管理", callback_data="admin_user_management")],
-        [InlineKeyboardButton("📢 发送广播", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("🔙 返回主菜单", callback_data="show_private_main_menu")]
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ 无权限")
+        return
+    stats = await get_bot_statistics()
+    text = (
+        "🔧 *管理面板*\n\n"
+        f"用户总数:{stats['total_users']}  评价总数:{stats['total_ratings']}\n"
+        f"24h 活跃:{stats['active_users_24h']}\n\n"
+        "请选择功能："
+    )
+    kb = [
+        [InlineKeyboardButton("🏷️ 标签管理", callback_data="admin_tags")],
+        [InlineKeyboardButton("🙈 隐藏用户", callback_data="admin_hide_user"),
+         InlineKeyboardButton("👀 取消隐藏", callback_data="admin_unhide_user")],
+        [InlineKeyboardButton("🔄 刷新", callback_data="admin_panel")]
     ]
-    
-    text = "⚙️ **管理员面板**\n请选择要管理的项目："
-    query = update.callback_query
-    if query:
-        await query.answer()
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    markup = InlineKeyboardMarkup(kb)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
     else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-# --- Tag Management ---
-async def manage_tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update): return
-    query = update.callback_query
-    await query.answer()
-    
-    tags = await database.db_fetch_all("SELECT pkid, name, type, is_active FROM tags ORDER BY type, name")
-    
-    text = "✏️ **标签管理**\n"
-    keyboard = [[InlineKeyboardButton("➕ 添加新标签", callback_data="admin_add_tag_prompt")]]
-    
-    if tags:
-        for tag in tags:
-            status_icon = "✅" if tag['is_active'] else "❌"
-            type_icon = "👍" if tag['type'] == 'recommend' else "👎"
-            text += f"\n{type_icon} {tag['name']} ({'激活' if tag['is_active'] else '禁用'})"
-            keyboard.append([InlineKeyboardButton(f"{status_icon} {tag['name']}", callback_data=f"admin_toggle_tag_{tag['pkid']}"),
-                             InlineKeyboardButton("🗑️ 删除", callback_data=f"admin_delete_tag_{tag['pkid']}")])
-    else:
-        text += "\n暂无标签。"
-        
-    keyboard.append([InlineKeyboardButton("🔙 返回管理面板", callback_data="admin_panel")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+async def admin_callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    if data == "admin_panel":
+        await admin_panel(update, context)
+    elif data == "admin_tags":
+        await show_tag_management(q)
+    elif data.startswith("admin_tag_toggle_"):
+        tid = int(data.split('_')[-1])
+        await toggle_tag(tid)
+        await show_tag_management(q)
+    elif data.startswith("admin_tag_delete_"):
+        tid = int(data.split('_')[-1])
+        await delete_tag(tid)
+        await show_tag_management(q)
+    elif data == "admin_add_tag":
+        await q.message.reply_text("请输入新标签名称：")
+        return TYPING_TAG_NAME
+    elif data == "admin_hide_user":
+        await q.message.reply_text("请输入要隐藏的用户名（不含@）：")
+        return TYPING_USERNAME_HIDE
+    elif data == "admin_unhide_user":
+        await q.message.reply_text("请输入要取消隐藏的用户名（不含@）：")
+        return TYPING_USERNAME_UNHIDE
 
-async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_admin(update): return ConversationHandler.END
-    await update.callback_query.message.reply_text("请输入新标签的名称（例如：靠谱/骗子）：\n\n发送 /cancel 可随时取消。")
-    return TYPING_TAG_NAME
+async def show_tag_management(q):
+    tags = await list_tags()
+    text = "🏷️ 标签管理：\n"
+    for t in tags:
+        status = "✅" if t['is_active'] else "❌"
+        text += f"{t['id']}. {t['name']} ({t['type']}) {status}\n"
+    kb = [[InlineKeyboardButton("➕ 添加", callback_data="admin_add_tag")]]
+    for t in tags[:10]:
+        kb.append([
+            InlineKeyboardButton(f"切换:{t['id']}", callback_data=f"admin_tag_toggle_{t['id']}"),
+            InlineKeyboardButton(f"删除:{t['id']}", callback_data=f"admin_tag_delete_{t['id']}")
+        ])
+    kb.append([InlineKeyboardButton("↩️ 返回", callback_data="admin_panel")])
+    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-async def handle_new_tag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_admin(update): return ConversationHandler.END
-    context.user_data['new_tag_name'] = update.message.text.strip()
-    keyboard = [
-        [InlineKeyboardButton("👍 推荐", callback_data="tag_type_recommend")],
-        [InlineKeyboardButton("👎 警告", callback_data="tag_type_warn")],
-    ]
-    await update.message.reply_text("请选择此标签的类型：", reply_markup=InlineKeyboardMarkup(keyboard))
+async def add_tag_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_tag_name"] = update.message.text.strip()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("正向", callback_data="tag_type_positive"),
+         InlineKeyboardButton("负向", callback_data="tag_type_negative")]
+    ])
+    await update.message.reply_text("请选择标签类型：", reply_markup=kb)
     return SELECTING_TAG_TYPE
 
-async def handle_tag_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_admin(update): return ConversationHandler.END
-    query = update.callback_query
-    tag_type = query.data.split('_')[2]
-    tag_name = context.user_data.get('new_tag_name')
-
-    if not tag_name:
-        await query.message.reply_text("发生错误，请重新开始。")
+async def add_tag_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    tag_type = q.data.split('_')[-1]
+    name = context.user_data.get("new_tag_name")
+    if not name:
+        await q.message.reply_text("名称缺失，请重试。")
         return ConversationHandler.END
-
-    try:
-        await database.db_execute("INSERT INTO tags (name, type) VALUES ($1, $2)", tag_name, tag_type)
-        await query.message.reply_text(f"✅ 标签 '{tag_name}' ({tag_type}) 已成功添加！")
-    except Exception as e:
-        logger.error(f"Error adding new tag: {e}")
-        await query.message.reply_text("❌ 添加失败，可能标签名称已存在。")
-    
-    context.user_data.clear()
-    # Go back to the manage tags panel
-    query.data = "admin_manage_tags"
-    await manage_tags_panel(update, context)
+    ok = await add_tag(name, tag_type)
+    await q.message.reply_text("添加成功" if ok else "添加失败")
     return ConversationHandler.END
 
-async def toggle_tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggles a tag's active status."""
-    if not await check_admin(update): return
-    query = update.callback_query
-    tag_pkid = int(query.data.split('_')[3])
-    
-    current_status = await database.db_fetch_val("SELECT is_active FROM tags WHERE pkid = $1", tag_pkid)
-    new_status = not current_status
-    
-    await database.db_execute("UPDATE tags SET is_active = $1 WHERE pkid = $2", new_status, tag_pkid)
-    await query.answer(f"标签已{'激活' if new_status else '禁用'}")
-    
-    query.data = "admin_manage_tags"
-    await manage_tags_panel(update, context)
-
-async def delete_tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_admin(update): return
-    query = update.callback_query
-    tag_pkid = int(query.data.split('_')[3])
-    # Note: ON DELETE CASCADE in DB will handle evaluations
-    await database.db_execute("DELETE FROM tags WHERE pkid = $1", tag_pkid)
-    await query.answer("🗑️ 标签已删除")
-    query.data = "admin_manage_tags"
-    await manage_tags_panel(update, context)
-
-# --- Menu Button Management ---
-async def manage_menu_buttons_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # This logic is very similar to tag management, omitted for brevity but would include:
-    # - Listing buttons with status and reorder arrows
-    # - Add, toggle, delete, reorder functionality
-    await update.callback_query.edit_message_text(
-        "菜单按钮管理功能正在开发中...", 
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel")]])
-    )
-
-# --- User Management ---
-async def user_management_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays the user management panel."""
-    if not await check_admin(update): return
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = [
-        [InlineKeyboardButton("👤 添加用户到隐身名单", callback_data="admin_hide_user_prompt")],
-        [InlineKeyboardButton("👀 从隐身名单中恢复用户", callback_data="admin_unhide_user_prompt")],
-        [InlineKeyboardButton("🔙 返回管理面板", callback_data="admin_panel")]
-    ]
-    await query.edit_message_text(
-        "👤 **用户管理**\n\n进入隐身名单的用户将无法被查询，并从所有排行榜中移除。",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def prompt_for_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Prompts for a username to hide or unhide."""
-    if not await check_admin(update): return ConversationHandler.END
-    query = update.callback_query
-    action = query.data.split('_')[1]  # 'hide' or 'unhide'
-    context.user_data['user_manage_action'] = action
-    
-    state_map = {'hide': TYPING_USERNAME_TO_HIDE, 'unhide': TYPING_USERNAME_TO_UNHIDE}
-    prompt_text = "好的，请发送您要【隐藏】的用户的 @username：" if action == 'hide' else "好的，请发送您要【恢复】的用户的 @username："
-    
-    await query.message.reply_text(prompt_text + "\n\n发送 /cancel 可随时取消。")
-    return state_map[action]
-
-async def set_user_hidden_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Sets the hidden status for a given username."""
-    if not await check_admin(update): return ConversationHandler.END
-    
-    username = update.message.text.strip()
-    if username.startswith('@'):
-        username = username[1:]
-        
-    action = context.user_data.get('user_manage_action')
-    set_to_hidden = (action == 'hide')
-    
-    user_pkid = await database.db_fetch_val("SELECT pkid FROM users WHERE username = $1", username)
-    
-    if not user_pkid:
-        await update.message.reply_text(f"❌ 未找到用户 @{username}，请确保该用户与机器人互动过。")
-    else:
-        await database.db_execute("UPDATE users SET is_hidden = $1 WHERE pkid = $2", set_to_hidden, user_pkid)
-        action_text = "隐藏" if set_to_hidden else "恢复"
-        await update.message.reply_text(f"✅ 操作成功！用户 @{username} 已被【{action_text}】。")
-    
-    del context.user_data['user_manage_action']
-    # Can't call user_management_panel directly as it needs a callback_query
-    await update.message.reply_text("返回用户管理菜单...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 用户管理", callback_data="admin_user_management")]]))
+async def hide_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uname = update.message.text.strip()
+    ok = await set_user_hidden_by_username(uname, True)
+    await update.message.reply_text("已隐藏" if ok else "操作失败或用户不存在")
     return ConversationHandler.END
+
+async def unhide_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uname = update.message.text.strip()
+    ok = await set_user_hidden_by_username(uname, False)
+    await update.message.reply_text("已取消隐藏" if ok else "操作失败或用户不存在")
+    return ConversationHandler.END
+
+async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("已取消")
+    return ConversationHandler.END
+
+def build_admin_conversations():
+    return ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback_router, pattern="^admin_")],
+        states={
+            TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_tag_name)],
+            SELECTING_TAG_TYPE: [CallbackQueryHandler(add_tag_type, pattern="^tag_type_")],
+            TYPING_USERNAME_HIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, hide_user_input)],
+            TYPING_USERNAME_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, unhide_user_input)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conv)],
+        map_to_parent={}
+    )
