@@ -1,119 +1,118 @@
 import logging
-import os
 import asyncio
-from dotenv import load_dotenv
-
+import os
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
+    MessageHandler,
     filters,
+    ConversationHandler,
 )
-
 import database
 from bot_handlers import *
 
 # --- Logging Setup ---
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-async def main() -> None:
-    """The main entry point for the bot."""
-    load_dotenv()
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN not found in environment variables. Bot cannot start.")
+# --- Main Application Setup ---
+async def main():
+    """Start the bot."""
+    # --- Environment Variables ---
+    bot_token = os.environ.get("BOT_TOKEN")
+    if not bot_token:
+        logger.error("FATAL: BOT_TOKEN environment variable not set.")
         return
 
-    # --- Database Setup ---
-    try:
-        await database.init_db()
-    except Exception as e:
-        logger.critical(f"Database initialization failed: {e}. Bot cannot start.", exc_info=True)
-        return
+    # --- Database Initialization ---
+    await database.init_db()
 
-    # --- Build the application with post_shutdown hook ---
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_shutdown(database.close_pool)
-        .build()
-    )
+    # --- Application Builder ---
+    application = Application.builder().token(bot_token).build()
 
-    # --- Conversation Handlers ---
+    # --- Conversation Handler for Admin Panel ---
+    # This handler manages multi-step interactions, like adding a new tag.
     admin_conv = ConversationHandler(
-        entry_points=[CommandHandler("admin", admin_panel)],
+        entry_points=[
+            CallbackQueryHandler(admin_panel, pattern='^admin_panel$'),
+            CallbackQueryHandler(manage_tags_panel, pattern='^admin_manage_tags$'),
+            CallbackQueryHandler(add_tag_prompt, pattern='^admin_add_tag_prompt$'),
+            CallbackQueryHandler(manage_menu_buttons_panel, pattern='^admin_menu_buttons$'),
+            CallbackQueryHandler(user_management_panel, pattern='^admin_user_management$'),
+            CallbackQueryHandler(prompt_for_username, pattern='^admin_(hide|unhide)_user_prompt$'),
+            CallbackQueryHandler(prompt_for_broadcast, pattern='^admin_broadcast$'),
+        ],
         states={
-            0: [
-                CallbackQueryHandler(admin_panel, pattern=r'^admin_panel$'),
-                CallbackQueryHandler(manage_tags_panel, pattern=r'^admin_manage_tags$'),
-                CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_'),
-                CallbackQueryHandler(manage_menu_buttons_panel, pattern=r'^admin_menu_buttons$'),
-                CallbackQueryHandler(delete_menu_button_callback, pattern=r'^delete_menu_'),
-                CallbackQueryHandler(toggle_menu_button_callback, pattern=r'^toggle_menu_'),
-                CallbackQueryHandler(reorder_menu_button_callback, pattern=r'^reorder_menu_'),
-                CallbackQueryHandler(user_management_panel, pattern=r'^admin_user_management$'),
-                CallbackQueryHandler(add_tag_prompt, pattern=r'^admin_add_tag_prompt$'),
-                CallbackQueryHandler(add_menu_button_prompt, pattern=r'^admin_add_menu_button_prompt$'),
-                CallbackQueryHandler(prompt_for_username, pattern=r'^admin_hide_user_prompt$'),
-                CallbackQueryHandler(prompt_for_username, pattern=r'^admin_unhide_user_prompt$'),
-                CallbackQueryHandler(prompt_for_broadcast, pattern=r'^admin_broadcast$'),
-            ],
             TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
-            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern=r'^tag_type_')],
-            TYPING_BUTTON_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_menu_button_name)],
-            SELECTING_BUTTON_ACTION: [CallbackQueryHandler(handle_new_menu_button_action, pattern=r'^action_')],
+            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern='^tag_type_')],
             TYPING_USERNAME_TO_HIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
             TYPING_USERNAME_TO_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
             TYPING_BROADCAST: [MessageHandler(filters.ALL & ~filters.COMMAND, get_broadcast_content)],
-            CONFIRM_BROADCAST: [CallbackQueryHandler(confirm_broadcast, pattern=r'^broadcast_')],
+            CONFIRM_BROADCAST: [CallbackQueryHandler(confirm_broadcast, pattern='^broadcast_(send|cancel)$')],
         },
-        fallbacks=[CommandHandler('cancel', cancel_action), CallbackQueryHandler(cancel_action, pattern=r'^cancel$')],
-        allow_reentry=True,
+        fallbacks=[
+            CallbackQueryHandler(cancel_action, pattern='^cancel$'),
+            CommandHandler('cancel', cancel_action)
+        ],
+        map_to_parent={
+            # Return to main admin panel after conversation ends
+            0: 0,
+            ConversationHandler.END: ConversationHandler.END
+        }
     )
 
-    # --- Register Handlers ---
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(admin_conv)
-    application.add_handler(CommandHandler("myreport", generate_my_report))
-    application.add_handler(MessageHandler(filters.Entity("mention") & filters.ChatType.GROUPS, handle_query))
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_menu_callback_handler))
-    application.add_handler(CallbackQueryHandler(tag_callback_handler, pattern=r'^tag_'))
-    application.add_handler(CallbackQueryHandler(leaderboard_type_callback_handler, pattern=r'^lb_'))
-    application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_'))
+    # --- Handlers ---
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(admin_conv) # Add the entire conversation flow
+    application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern=r'^admin_delete_tag_\d+$'))
+    application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern=r'^rep_(up|down)'))
+    application.add_handler(CallbackQuery_handler(tag_callback_handler, pattern=r'^tag_\d+$'))
+    application.add_handler(CallbackQueryHandler(private_menu_callback_handler, pattern=r'^menu_'))
     application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
-    application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
+    application.add_handler(CallbackQueryHandler(leaderboard_type_callback_handler, pattern=r'^leaderboard_'))
+    application.add_handler(MessageHandler(filters.Entity('mention') & filters.ChatType.GROUPS, handle_query))
 
-    # --- ULTIMATE FIX: Run the Bot with manual lifecycle management ---
-    # This approach is more robust for PaaS environments like Render.
+    # --- Run the Bot ---
+    logger.info("Bot is starting...")
+    
+    # The `async with` block handles startup and shutdown gracefully.
     try:
-        logger.info("Bot is starting with manual lifecycle management...")
         async with application:
+            # Start background tasks
+            application.create_task(run_suspicion_monitor()) # FIX 1: Removed the argument
+            
+            # Start polling
+            await application.initialize()
             await application.start()
-            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            await application.updater.start_polling()
             logger.info("Bot has started polling successfully.")
             
-            # Create background task after the application is fully running
-            application.create_task(run_suspicion_monitor(application.bot))
-            
-            # Keep the application running indefinitely
-            await asyncio.Event().wait()
+            # Keep the application running
+            while True:
+                await asyncio.sleep(3600)
+
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutdown signal received. The application will now stop gracefully.")
+        logger.info("Bot shutdown requested (KeyboardInterrupt/SystemExit).")
+    except Exception as e:
+        logger.error(f"An unhandled exception occurred: {e}", exc_info=True)
     finally:
-        if application.updater and application.updater.is_running:
+        # FIX 2: Simplified shutdown logic compatible with new library versions
+        if application and application.updater and application.updater.is_polling():
+            logger.info("Stopping polling...")
             await application.updater.stop()
-        if application.running:
-            await application.stop()
+        if application:
+            logger.info("Shutting down application...")
+            await application.shutdown()
         logger.info("Bot has been shut down.")
 
 
 if __name__ == '__main__':
-    # The outer try/except is now simpler as the main function handles the lifecycle.
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"Failed to run the bot: {e}", exc_info=True)
