@@ -39,6 +39,26 @@ logging.basicConfig(
 logger = logging.getLogger("bot")
 
 
+async def _debug_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug hook to log every incoming Update when DEBUG_UPDATES is enabled."""
+    if update:
+        update_id = getattr(update, 'update_id', 'unknown')
+        user_id = getattr(update.effective_user, 'id', 'unknown') if update.effective_user else 'unknown'
+        chat_id = getattr(update.effective_chat, 'id', 'unknown') if update.effective_chat else 'unknown'
+        msg_type = 'unknown'
+        
+        if update.message:
+            msg_type = 'message'
+        elif update.callback_query:
+            msg_type = 'callback_query'
+        elif update.inline_query:
+            msg_type = 'inline_query'
+        elif update.edited_message:
+            msg_type = 'edited_message'
+        
+        logger.info(f"Got update: id={update_id}, type={msg_type}, user={user_id}, chat={chat_id}")
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
     try:
@@ -133,6 +153,13 @@ def main():
     )
 
     app.add_error_handler(error_handler)
+
+    # Optional debug hook to log all incoming updates
+    debug_updates = os.getenv("DEBUG_UPDATES", "").lower() in ("true", "1", "yes")
+    if debug_updates:
+        app.add_handler(MessageHandler(filters.ALL, _debug_log), group=-1)
+        app.add_handler(CallbackQueryHandler(_debug_log), group=-1)
+        logger.info("Update debug hook enabled")
 
     # Track user activity (should run early)
     app.add_handler(MessageHandler(filters.ALL, track_user_activity), group=0)
