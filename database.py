@@ -1,190 +1,217 @@
-import asyncpg
-import logging
 import os
-from dotenv import load_dotenv
+import logging
+import asyncpg
+from typing import Optional, List, Dict, Any
+from telegram import User as TelegramUser
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
+pool: asyncpg.Pool = None
 
-# --- Connection Pool ---
-pool = None
-
-async def get_pool():
-    """Returns the existing database connection pool or creates a new one."""
-    global pool
-    if pool is None:
-        load_dotenv()
-        try:
-            pool = await asyncpg.create_pool(
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASSWORD"),
-                database=os.getenv("DB_NAME"),
-                host=os.getenv("DB_HOST"),
-                port=os.getenv("DB_PORT")
-            )
-            logger.info("Database connection pool created successfully.")
-        except Exception as e:
-            logger.critical(f"Failed to create database connection pool: {e}")
-            raise
-    return pool
-
-async def close_pool():
-    """Closes the database connection pool."""
-    global pool
-    if pool:
-        await pool.close()
-        pool = None
-        logger.info("Database connection pool closed.")
-
-# --- Database Initialization ---
 async def init_db():
-    """
-    Initializes the database: creates tables and adds necessary columns/indexes if they don't exist.
-    This is the upgraded version for performance and new features.
-    """
-    db_pool = await get_pool()
-    async with db_pool.acquire() as connection:
-        logger.info("Starting database initialization...")
+    """Initialize the database connection pool and create tables if they don't exist."""
+    global pool
+    
+    # 优先使用 DATABASE_URL，如果没有则使用分离的配置
+    database_url = os.getenv('DATABASE_URL')
+    
+    if database_url:
+        # 处理一些云平台的 postgres:// 格式（需要改为 postgresql://）
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql://', 1)
+        
+        pool = await asyncpg.create_pool(
+            database_url,
+            min_size=1,
+            max_size=10,
+            ssl='require' if 'sslmode=require' in database_url else None
+        )
+    else:
+        # 使用分离的配置变量
+        pool = await asyncpg.create_pool(
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD'),
+            database=os.getenv('DB_NAME'),
+            host=os.getenv('DB_HOST'),
+            port=os.getenv('DB_PORT'),
+            min_size=1,
+            max_size=10
+        )
+    
+    logger.info("Database pool created successfully.")
+    await create_tables()
 
-        # User Table
-        await connection.execute("""
+async def create_tables():
+    """Create all necessary tables if they don't exist."""
+    async with pool.acquire() as conn:
+        # Users table
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 pkid SERIAL PRIMARY KEY,
                 id BIGINT UNIQUE NOT NULL,
-                username VARCHAR(32),
-                first_name VARCHAR(255) NOT NULL,
-                is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-                is_hidden BOOLEAN NOT NULL DEFAULT FALSE
-            );
+                username VARCHAR(255),
+                first_name VARCHAR(255),
+                last_name VARCHAR(255),
+                is_admin BOOLEAN DEFAULT FALSE,
+                is_hidden BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
         """)
-
-        # Add is_hidden column to existing table if missing
-        await connection.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='is_hidden') THEN
-                    ALTER TABLE users ADD COLUMN is_hidden BOOLEAN NOT NULL DEFAULT FALSE;
-                END IF;
-            END $$;
-        """)
-
-        # Tags Table
-        await connection.execute("""
+        
+        # Tags table
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tags (
                 pkid SERIAL PRIMARY KEY,
-                name VARCHAR(50) UNIQUE NOT NULL,
-                type VARCHAR(10) NOT NULL, -- 'recommend' or 'warn'
-                is_active BOOLEAN NOT NULL DEFAULT TRUE
-            );
+                name VARCHAR(100) UNIQUE NOT NULL,
+                type VARCHAR(20) NOT NULL CHECK (type IN ('recommend', 'warn')),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
         """)
-
-        # Evaluations Table
-        await connection.execute("""
+        
+        # Evaluations table
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS evaluations (
                 pkid SERIAL PRIMARY KEY,
-                evaluator_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                tag_pkid INTEGER NOT NULL REFERENCES tags(pkid) ON DELETE CASCADE,
-                type VARCHAR(10) NOT NULL, -- 'recommend' or 'warn'
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+                evaluator_user_pkid INTEGER REFERENCES users(pkid),
+                target_user_pkid INTEGER REFERENCES users(pkid),
+                tag_pkid INTEGER REFERENCES tags(pkid) ON DELETE CASCADE,
+                type VARCHAR(20) NOT NULL CHECK (type IN ('recommend', 'warn')),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(evaluator_user_pkid, target_user_pkid, tag_pkid)
+            )
         """)
         
-        # Add created_at column to existing table if missing
-        await connection.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='evaluations' AND column_name='created_at') THEN
-                    ALTER TABLE evaluations ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-                END IF;
-            END $$;
-        """)
-
-        # Favorites Table
-        await connection.execute("""
+        # Favorites table
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS favorites (
                 pkid SERIAL PRIMARY KEY,
-                user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
-                target_user_pkid INTEGER NOT NULL REFERENCES users(pkid) ON DELETE CASCADE,
+                user_pkid INTEGER REFERENCES users(pkid),
+                target_user_pkid INTEGER REFERENCES users(pkid),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_pkid, target_user_pkid)
-            );
+            )
         """)
-
-        # Menu Buttons Table
-        await connection.execute("""
+        
+        # Menu buttons table
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS menu_buttons (
                 pkid SERIAL PRIMARY KEY,
-                name VARCHAR(50) NOT NULL,
+                name VARCHAR(100) NOT NULL,
                 action_id VARCHAR(50) NOT NULL,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                sort_order INTEGER NOT NULL DEFAULT 0
-            );
+                sort_order INTEGER DEFAULT 0,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
         """)
         
-        # --- PERFORMANCE UPGRADE: ADD INDEXES ---
-        logger.info("Applying database indexes for performance...")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_users_id ON users (id);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_users_is_hidden ON users (is_hidden);")
+        # Create indexes for better performance
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_target ON evaluations(target_user_pkid)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_evaluator ON evaluations(evaluator_user_pkid)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_target ON favorites(target_user_pkid)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
         
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_target_user ON evaluations (target_user_pkid);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_evaluator_user ON evaluations (evaluator_user_pkid);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_evaluations_type_created_at ON evaluations (type, created_at);")
+        # Insert default data
+        await insert_default_data(conn)
         
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_favorites_user_target ON favorites (user_pkid, target_user_pkid);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_tags_type ON tags (type);")
-        await connection.execute("CREATE INDEX IF NOT EXISTS idx_menu_buttons_order ON menu_buttons (sort_order);")
+        # Create/update admin user
+        await create_admin_user(conn)
+        
+    logger.info("All tables created successfully.")
 
-        logger.info("Database initialization and performance upgrade complete.")
+async def insert_default_data(conn):
+    """Insert default tags and menu buttons."""
+    # Default tags
+    default_tags = [
+        ('靠谱', 'recommend'),
+        ('热心', 'recommend'),
+        ('专业', 'recommend'),
+        ('骗子', 'warn'),
+        ('失联', 'warn'),
+        ('态度差', 'warn'),
+    ]
+    
+    for name, tag_type in default_tags:
+        await conn.execute("""
+            INSERT INTO tags (name, type) 
+            VALUES ($1, $2) 
+            ON CONFLICT (name) DO NOTHING
+        """, name, tag_type)
+    
+    # Default menu buttons
+    default_buttons = [
+        ('📊 查看排行榜', 'show_leaderboard', 1),
+        ('❤️ 我的收藏', 'show_my_favorites', 2),
+        ('❓ 帮助', 'show_help', 3),
+    ]
+    
+    for name, action_id, sort_order in default_buttons:
+        await conn.execute("""
+            INSERT INTO menu_buttons (name, action_id, sort_order) 
+            VALUES ($1, $2, $3) 
+            ON CONFLICT DO NOTHING
+        """, name, action_id, sort_order)
 
-# --- Generic DB Helpers ---
-async def db_fetch_all(query, *params):
-    db_pool = await get_pool()
-    async with db_pool.acquire() as connection:
-        return await connection.fetch(query, *params)
+async def create_admin_user(conn):
+    """Create or update the admin user."""
+    admin_id = os.getenv('ADMIN_USER_ID')
+    if admin_id:
+        await conn.execute("""
+            INSERT INTO users (id, is_admin) 
+            VALUES ($1, TRUE) 
+            ON CONFLICT (id) DO UPDATE 
+            SET is_admin = TRUE
+        """, int(admin_id))
+        logger.info(f"Admin user {admin_id} created/updated.")
 
-async def db_fetch_one(query, *params):
-    db_pool = await get_pool()
-    async with db_pool.acquire() as connection:
-        return await connection.fetchrow(query, *params)
+# --- User Management ---
+async def save_user(user: TelegramUser) -> int:
+    """Save or update a Telegram user and return their pkid."""
+    async with pool.acquire() as conn:
+        pkid = await conn.fetchval("""
+            INSERT INTO users (id, username, first_name, last_name) 
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO UPDATE 
+            SET username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING pkid
+        """, user.id, user.username, user.first_name, user.last_name)
+        return pkid
 
-async def db_fetch_val(query, *params):
-    db_pool = await get_pool()
-    async with db_pool.acquire() as connection:
-        return await connection.fetchval(query, *params)
+async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
+    """Get a user by their Telegram ID."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+        return dict(row) if row else None
 
-async def db_execute(query, *params):
-    db_pool = await get_pool()
-    async with db_pool.acquire() as connection:
-        return await connection.execute(query, *params)
+# --- Generic Database Operations ---
+async def db_fetch_one(query: str, *args) -> Optional[Dict[str, Any]]:
+    """Fetch one row from the database."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(query, *args)
+        return dict(row) if row else None
 
-# --- User specific functions ---
-async def get_user(user_id: int):
-    """Gets a user by their Telegram ID."""
-    return await db_fetch_one("SELECT * FROM users WHERE id = $1", user_id)
+async def db_fetch_all(query: str, *args) -> List[Dict[str, Any]]:
+    """Fetch all rows from the database."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query, *args)
+        return [dict(row) for row in rows]
 
-async def save_user(user: dict):
-    """Saves or updates a user in the database."""
-    user_id = user.id
-    username = user.username
-    first_name = user.first_name
-    admin_user_id = os.getenv("ADMIN_USER_ID")
+async def db_fetch_val(query: str, *args) -> Any:
+    """Fetch a single value from the database."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(query, *args)
 
-    is_admin = str(user_id) == str(admin_user_id)
+async def db_execute(query: str, *args) -> str:
+    """Execute a query without returning results."""
+    async with pool.acquire() as conn:
+        return await conn.execute(query, *args)
 
-    existing_user = await get_user(user_id)
-    if existing_user:
-        await db_execute(
-            "UPDATE users SET username = $1, first_name = $2, is_admin = $3 WHERE id = $4",
-            username, first_name, is_admin, user_id
-        )
-        return existing_user['pkid']
-    else:
-        return await db_fetch_val(
-            "INSERT INTO users (id, username, first_name, is_admin) VALUES ($1, $2, $3, $4) RETURNING pkid",
-            user_id, username, first_name, is_admin
-        )
+async def close_db():
+    """Close the database connection pool."""
+    global pool
+    if pool:
+        await pool.close()
+        logger.info("Database pool closed.")
