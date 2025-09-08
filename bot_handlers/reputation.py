@@ -33,7 +33,6 @@ async def handle_any_mention(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not row:
                 await msg.reply_text(f"❌ 用户名 {raw} 不合法")
                 continue
-            # 记录查询
             try:
                 await log_user_query(msg.from_user.id, row["user_id"], msg.chat.id if msg.chat else None)
             except Exception:
@@ -128,7 +127,7 @@ async def tag_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             user_id=uid,
             sentiment=sent
         )
-        # 如果需要 sentiment 改变时清空旧标签，放开下一行
+        # 可选：若情感改变时清空旧标签，取消下一行的注释
         # if changed and not is_new: await clear_tags_if_sentiment_changed(rating_id)
         if chosen:
             await attach_tags_to_rating(rating_id, chosen)
