@@ -20,6 +20,7 @@ from bot_handlers.admin import admin_panel, build_admin_conversations
 from bot_handlers.monitoring import run_suspicion_monitor
 
 from database import init_db, close_db, save_user, promote_virtual_user
+from tools.ensure_schema import ensure_schema
 
 load_dotenv()
 
@@ -33,12 +34,14 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Unhandled exception: {context.error}", exc_info=context.error)
     try:
         if update and update.effective_message:
-            await update.effective_message.chat.send_message("❌ 出错了，请稍后再试。")
+            await update.effective_message.reply_text("❌ 出错了，请稍后再试。")
     except Exception as e:
         logger.error(f"Send error message fail: {e}")
 
 async def post_init(app: Application):
     await init_db()
+    # 启动时自检/自愈 schema（幂等）
+    await ensure_schema()
     asyncio.create_task(run_suspicion_monitor(app.bot))
     logger.info("Bot initialized (webhook mode)")
 
@@ -82,15 +85,12 @@ def main():
         raise RuntimeError("BOT_TOKEN missing")
 
     # Webhook 配置
-    # Render Web Service 会注入 PORT 和 RENDER_EXTERNAL_URL（也可自定义 WEBHOOK_BASE_URL）
     port = int(os.getenv("PORT", "10000"))
     base_url = os.getenv("WEBHOOK_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL")
     if not base_url:
         raise RuntimeError("WEBHOOK_BASE_URL or RENDER_EXTERNAL_URL is required for webhook deployment")
-    # 确保 base_url 末尾无斜杠
     if base_url.endswith('/'):
         base_url = base_url[:-1]
-    # 路径可自定义（建议随机路径），默认使用 /webhook/<前8位token>
     default_path = f"/webhook/{token[:8]}"
     url_path = os.getenv("WEBHOOK_PATH", default_path)
     if not url_path.startswith('/'):
@@ -106,7 +106,6 @@ def main():
         .build()
     )
 
-    # 全局错误
     app.add_error_handler(error_handler)
 
     # 用户追踪
@@ -149,7 +148,6 @@ def main():
     app.add_handler(admin_conv)
 
     logger.info(f"Starting webhook server on 0.0.0.0:{port} path={url_path} url={webhook_url}")
-    # 运行 Webhook（会自动调用 setWebhook）
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
