@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await save_user(user)
-    # 升级潜在虚拟
     try:
         await promote_virtual_user(user)
     except Exception as e:
