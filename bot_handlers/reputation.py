@@ -1,131 +1,179 @@
 import logging
+import math
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 import database
 
 logger = logging.getLogger(__name__)
+DECAY_LAMBDA = 0.0038  # Half-life of ~6 months
+
+async def get_reputation_stats(target_user_pkid: int):
+    """Fetches reputation stats for a user with time decay."""
+    query = f"""
+        WITH weighted_evals AS (
+            SELECT
+                type,
+                exp(-{DECAY_LAMBDA} * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0) as weight
+            FROM evaluations
+            WHERE target_user_pkid = $1
+        )
+        SELECT
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend') as total_recommends,
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'warn') as total_warns,
+            COALESCE(SUM(CASE WHEN type = 'recommend' THEN weight ELSE 0 END), 0) as weighted_recommends,
+            COALESCE(SUM(CASE WHEN type = 'warn' THEN weight ELSE 0 END), 0) as weighted_warns
+        FROM weighted_evals
+    """
+    
+    stats = await database.db_fetch_one(query, target_user_pkid)
+    
+    if not stats or stats['total_recommends'] is None:
+        return {"recommend_count": 0, "warn_count": 0, "reputation_score": 0, "favorites_count": 0}
+
+    reputation_score = stats['weighted_recommends'] - stats['weighted_warns']
+    
+    favorites_count = await database.db_fetch_val(
+        "SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1", target_user_pkid
+    )
+
+    return {
+        "recommend_count": stats['total_recommends'],
+        "warn_count": stats['total_warns'],
+        "reputation_score": math.ceil(reputation_score * 10),
+        "favorites_count": favorites_count or 0
+    }
 
 async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles @username queries in groups to show reputation based on evaluations."""
-    if not update.message or not update.message.text:
+    """Handles @username queries."""
+    message_text = update.message.text
+    # Find all @mentions
+    entities = [e for e in update.message.entities if e.type == 'mention']
+    if not entities:
         return
 
-    text = update.message.text
-    entities = update.message.entities
+    # Process only the first mention
+    entity = entities[0]
+    target_username = message_text[entity.offset + 1 : entity.offset + entity.length]
+    
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
 
-    try:
-        # Find the first @mention in the message
-        mention_entity = next((e for e in entities if e.type == 'mention'), None)
-        if not mention_entity:
-            return
+    target_user_record = await database.db_fetch_one(
+        "SELECT pkid, is_hidden FROM users WHERE username = $1", target_username
+    )
 
-        target_username = text[mention_entity.offset + 1 : mention_entity.offset + mention_entity.length]
+    if not target_user_record or target_user_record['is_hidden']:
+        await update.message.reply_text(f"找不到用户 @{target_username} 或该用户已被管理员隐藏。")
+        return
         
-        # Get target user's pkid and hidden status from your DB schema
-        target_user_data = await database.db_fetch_one(
-            "SELECT pkid, is_hidden FROM users WHERE username ILIKE $1", target_username
+    target_user_pkid = target_user_record['pkid']
+
+    stats = await get_reputation_stats(target_user_pkid)
+    
+    is_favorited = await database.db_fetch_val(
+        "SELECT 1 FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+        evaluator_pkid, target_user_pkid
+    )
+
+    text = (
+        f"👤 **@{target_username} 的声誉档案**\n\n"
+        f"👍 **推荐**: {stats['recommend_count']} 次\n"
+        f"👎 **警告**: {stats['warn_count']} 次\n"
+        f"❤️ **收藏人气**: {stats['favorites_count']}\n"
+        f"🔥 **综合声望**: {stats['reputation_score']}"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("👍 推荐", callback_data=f"rep_rec_{target_user_pkid}"),
+            InlineKeyboardButton("👎 警告", callback_data=f"rep_warn_{target_user_pkid}"),
+        ],
+        [
+            InlineKeyboardButton("💔 取消收藏" if is_favorited else "❤️ 收藏", callback_data=f"rep_fav_{target_user_pkid}"),
+            InlineKeyboardButton("📊 详细统计", callback_data=f"rep_stats_{target_user_pkid}"),
+        ]
+    ]
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def reputation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles all callbacks starting with 'rep_'."""
+    query = update.callback_query
+    await query.answer()
+    
+    parts = query.data.split('_')
+    action = parts[1]
+    target_user_pkid = int(parts[2])
+
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
+
+    if action in ['rec', 'warn']:
+        tag_type = 'recommend' if action == 'rec' else 'warn'
+        tags = await database.db_fetch_all("SELECT pkid, name FROM tags WHERE type = $1 AND is_active = TRUE", tag_type)
+        if not tags:
+            await query.edit_message_text(f"暂无可用标签，请联系管理员添加。")
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton(tag['name'], callback_data=f"tag_{tag['pkid']}_{target_user_pkid}")]
+            for tag in tags
+        ]
+        keyboard.append([InlineKeyboardButton("🔙 取消", callback_data=f"rep_cancel_{target_user_pkid}")])
+        action_text = "推荐" if tag_type == 'recommend' else "警告"
+        await query.edit_message_text(f"请为您的“{action_text}”选择一个标签：", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif action == 'fav':
+        is_favorited = await database.db_fetch_val(
+            "SELECT 1 FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+            evaluator_pkid, target_user_pkid
         )
+        if is_favorited:
+            await database.db_execute(
+                "DELETE FROM favorites WHERE user_pkid = $1 AND target_user_pkid = $2",
+                evaluator_pkid, target_user_pkid
+            )
+            await query.answer("💔 已取消收藏")
+        else:
+            await database.db_execute(
+                "INSERT INTO favorites (user_pkid, target_user_pkid) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                evaluator_pkid, target_user_pkid
+            )
+            await query.answer("❤️ 已收藏！")
+        # Note: We don't update the original message to avoid race conditions in groups.
+        # The change will be reflected the next time the user is queried.
 
-        if not target_user_data:
-            await update.message.reply_text(f"数据库中找不到用户 @{target_username}。")
-            return
-        
-        if target_user_data['is_hidden']:
-            await update.message.reply_text(f"用户 @{target_username} 已被管理员隐藏。")
-            return
-
-        target_user_pkid = target_user_data['pkid']
-
-        # Calculate score from 'evaluations' table
-        recommends = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend'", target_user_pkid
-        ) or 0
-        warns = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'warn'", target_user_pkid
-        ) or 0
-        
-        score = recommends - warns
-
-        # Get active tags for creating evaluation buttons
-        tags = await database.db_fetch_all("SELECT pkid, name, type FROM tags WHERE is_active = TRUE")
-        
-        keyboard = []
-        if tags:
-            recommend_buttons = [
-                InlineKeyboardButton(f"👍 {tag['name']}", callback_data=f"eval_rec_{tag['pkid']}_{target_user_pkid}")
-                for tag in tags if tag['type'] == 'recommend'
-            ]
-            warn_buttons = [
-                InlineKeyboardButton(f"👎 {tag['name']}", callback_data=f"eval_warn_{tag['pkid']}_{target_user_pkid}")
-                for tag in tags if tag['type'] == 'warn'
-            ]
-            if recommend_buttons:
-                keyboard.append(recommend_buttons)
-            if warn_buttons:
-                keyboard.append(warn_buttons)
-
-        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-        
-        message_text = (
-            f"查询用户 @{target_username} 的评价:\n\n"
-            f"👍 **推荐: {recommends} 次**\n"
-            f"👎 **警告: {warns} 次**\n"
-            f"⭐️ **综合评分: {score}**\n\n"
-            "您可以对他/她进行评价:"
-        )
-
-        await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error in handle_query: {e}", exc_info=True)
-        await update.message.reply_text("查询用户评价时发生错误。")
-
-
-async def evaluation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles button presses for evaluations (recommend/warn)."""
+async def tag_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles tag selection for an evaluation."""
     query = update.callback_query
     
-    try:
-        await query.answer()
-        
-        # callback_data format: "eval_rec_TAGPKID_TARGETPKID" or "eval_warn_TAGPKID_TARGETPKID"
-        _, eval_type, tag_pkid_str, target_user_pkid_str = query.data.split('_')
-        tag_pkid = int(tag_pkid_str)
-        target_user_pkid = int(target_user_pkid_str)
-        
-        evaluator_user_id = query.from_user.id
+    parts = query.data.split('_')
+    tag_pkid = int(parts[1])
+    target_user_pkid = int(parts[2])
+    
+    evaluator_user = update.effective_user
+    evaluator_pkid = await database.save_user(evaluator_user)
 
-        # Get pkid for the user who clicked the button
-        evaluator_user_pkid = await database.get_or_create_user(query.from_user)
+    tag_info = await database.db_fetch_one("SELECT type FROM tags WHERE pkid = $1", tag_pkid)
+    if not tag_info:
+        await query.answer("标签不存在或已失效。")
+        return
 
-        if not evaluator_user_pkid:
-            await query.edit_message_text("错误：无法识别您的身份。")
-            return
-            
-        # Prevent self-evaluation
-        if evaluator_user_pkid == target_user_pkid:
-            await query.answer("您不能评价自己。", show_alert=True)
-            return
-
-        # Record the evaluation in the database
-        await database.db_execute(
-            """
-            INSERT INTO evaluations (evaluator_user_pkid, target_user_pkid, tag_pkid, type)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (evaluator_user_pkid, target_user_pkid, tag_pkid) DO UPDATE SET
-            type = EXCLUDED.type, created_at = NOW();
-            """,
-            evaluator_user_pkid, target_user_pkid, tag_pkid, eval_type
-        )
+    # Prevent self-evaluation
+    if evaluator_pkid == target_user_pkid:
+        await query.answer("您不能评价自己。", show_alert=True)
+        # Restore original message if possible, or just send a text
+        await query.edit_message_text("操作失败：您不能评价自己。")
+        return
         
-        tag_name = await database.db_fetch_val("SELECT name FROM tags WHERE pkid = $1", tag_pkid)
-        
-        await query.edit_message_text(f"✅ 您已成功评价，标签为: **{tag_name}**", parse_mode='Markdown')
-
-    except Exception as e:
-        logger.error(f"Error in evaluation_callback_handler: {e}", exc_info=True)
-        # Use try-except for the edit_message_text in case the message was deleted
-        try:
-            await query.edit_message_text("处理评价时发生错误。")
-        except:
-            pass
+    await database.db_execute(
+        """
+        INSERT INTO evaluations (evaluator_user_pkid, target_user_pkid, tag_pkid, type)
+        VALUES ($1, $2, $3, $4)
+        """,
+        evaluator_pkid, target_user_pkid, tag_pkid, tag_info['type']
+    )
+    
+    target_username = await database.db_fetch_val("SELECT username FROM users WHERE pkid = $1", target_user_pkid)
+    
+    await query.edit_message_text(f"✅ 感谢您的评价！您已成功评价 @{target_username}。")
