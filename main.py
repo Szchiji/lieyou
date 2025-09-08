@@ -7,9 +7,10 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telegram.constants import ChatAction, ParseMode
 
 from database import init_db, save_user, get_user
-from handlers.query_handler import handle_query
-from handlers.admin_handler import admin_panel, handle_admin_callback
-from handlers.user_handler import get_user_display_name
+# 修改这里的导入路径
+from bot_handlers.query_handler import handle_query
+from bot_handlers.admin import admin_panel, handle_admin_callback
+from bot_handlers.common import get_user_display_name
 
 # Load environment variables
 load_dotenv()
@@ -61,7 +62,7 @@ def main() -> None:
     application = Application.builder().token(TOKEN).build()
     
     # Message handlers
-    # Handle @mentions in groups - 修复这里
+    # Handle @mentions in groups
     application.add_handler(MessageHandler(
         filters.Entity("mention") & filters.ChatType.GROUPS,
         handle_query
