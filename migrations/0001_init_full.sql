@@ -1,4 +1,4 @@
--- 单文件初始化（适合全新数据库）。如已有旧表，请优先用 tools/ensure_schema.py 自愈，不要重复执行本文件。
+-- 全新数据库初始化（幂等）
 CREATE TABLE IF NOT EXISTS users (
   user_id BIGINT PRIMARY KEY,
   username TEXT UNIQUE,
@@ -55,7 +55,6 @@ CREATE TABLE IF NOT EXISTS user_queries (
 CREATE INDEX IF NOT EXISTS idx_user_queries_req ON user_queries(requester_id);
 CREATE INDEX IF NOT EXISTS idx_user_queries_target ON user_queries(target_user_id);
 
--- 评价对唯一
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -65,5 +64,4 @@ BEGIN
   END IF;
 END $$;
 
--- 虚拟用户序列
 CREATE SEQUENCE IF NOT EXISTS virtual_user_seq START 1 INCREMENT 1;
