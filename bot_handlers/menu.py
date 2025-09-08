@@ -53,9 +53,9 @@ async def private_menu_callback_handler(update: Update, context: ContextTypes.DE
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "❓ 帮助：\n"
-        "• 群 / 私聊发送 @用户名 => 查询/创建档案\n"
+        "• 群 / 私聊发送 @用户名 => 查询并评价\n"
         "• 点 👍/👎 进入多标签选择，勾选后点 完成\n"
-        "• 对同一用户只保留一条评价，重复会覆盖情感并追加标签\n"
+        "• 同一评价者对同一用户只有一条记录，重复会覆盖情感并追加标签\n"
         "• ⭐ 收藏 / 📊 排行榜 / 📋 我的报告\n"
         "• 管理员：🔧 面板\n"
     )
