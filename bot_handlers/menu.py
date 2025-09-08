@@ -2,6 +2,8 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 import database
+from .start import show_private_main_menu # Correctly import from start.py
+from .reports import generate_my_report # Import the report function
 
 logger = logging.getLogger(__name__)
 
@@ -13,15 +15,14 @@ async def private_menu_callback_handler(update: Update, context: ContextTypes.DE
     action = query.data
     
     if action == 'menu_my_report':
-        from .reports import generate_my_report
         await generate_my_report(update, context)
     elif action == 'menu_leaderboard':
         await show_leaderboard_callback_handler(update, context)
     elif action == 'show_private_main_menu':
-        from .start import show_private_main_menu
         await show_private_main_menu(update, context)
     else:
-        await query.edit_message_text(f"功能 '{action}' 正在开发中。")
+        # This handles any other dynamic buttons that don't have special handlers
+        await query.edit_message_text(f"您点击了功能 '{action}'，但该功能目前没有特定操作。")
 
 async def show_leaderboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the leaderboard type selection menu."""
