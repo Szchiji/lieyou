@@ -27,12 +27,9 @@ SELECTING_TAG_TYPE = 1002
 TYPING_USERNAME_HIDE = 1003
 TYPING_USERNAME_UNHIDE = 1004
 
-
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """入口面板：仅管理员可见"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
-        # 根据来源安全回复
         if update.message:
             await update.message.reply_text("❌ 无权限")
         elif update.callback_query:
@@ -63,9 +60,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
-
 async def admin_callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理面板内的所有 inline 回调入口"""
     q = update.callback_query
     await q.answer()
     data = q.data
@@ -92,9 +87,7 @@ async def admin_callback_router(update: Update, context: ContextTypes.DEFAULT_TY
         await q.message.reply_text("请输入要取消隐藏的用户名（不含@）：")
         return TYPING_USERNAME_UNHIDE
 
-
 async def show_tag_management(q):
-    """展示标签管理界面"""
     tags = await list_tags()
     text = "🏷️ 标签管理：\n"
     for t in tags:
@@ -102,7 +95,6 @@ async def show_tag_management(q):
         text += f"{t['id']}. {t['name']} ({t['type']}) {status}\n"
 
     kb = [[InlineKeyboardButton("➕ 添加", callback_data="admin_add_tag")]]
-    # 操作前 10 条，避免按钮过多
     for t in tags[:10]:
         kb.append(
             [
@@ -117,9 +109,7 @@ async def show_tag_management(q):
     kb.append([InlineKeyboardButton("↩️ 返回", callback_data="admin_panel")])
     await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-
 async def add_tag_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """输入新标签名称后，要求选择类型"""
     context.user_data["new_tag_name"] = update.message.text.strip()
     kb = InlineKeyboardMarkup(
         [
@@ -132,9 +122,7 @@ async def add_tag_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("请选择标签类型：", reply_markup=kb)
     return SELECTING_TAG_TYPE
 
-
 async def add_tag_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """选择标签类型并创建标签"""
     q = update.callback_query
     await q.answer()
     tag_type = q.data.split("_")[-1]
@@ -147,34 +135,23 @@ async def add_tag_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text("添加成功" if ok else "添加失败")
     return ConversationHandler.END
 
-
 async def hide_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """输入需要隐藏的用户名"""
     uname = update.message.text.strip()
     ok = await set_user_hidden_by_username(uname, True)
     await update.message.reply_text("已隐藏" if ok else "操作失败或用户不存在")
     return ConversationHandler.END
 
-
 async def unhide_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """输入需要取消隐藏的用户名"""
     uname = update.message.text.strip()
     ok = await set_user_hidden_by_username(uname, False)
     await update.message.reply_text("已取消隐藏" if ok else "操作失败或用户不存在")
     return ConversationHandler.END
 
-
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """对话取消"""
     await update.message.reply_text("已取消")
     return ConversationHandler.END
 
-
 def build_admin_conversations():
-    """
-    创建管理员对话处理器。
-    提示修复：设置 per_message=True 可消除 PTBUserWarning。
-    """
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback_router, pattern="^admin_")],
         states={
@@ -193,5 +170,5 @@ def build_admin_conversations():
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
         map_to_parent={},
-        per_message=True,  # 避免警告；使用回调作为入口时推荐开启
+        per_message=True,  # 消除 PTBUserWarning
     )
