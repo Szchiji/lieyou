@@ -13,14 +13,11 @@ async def private_menu_callback_handler(update: Update, context: ContextTypes.DE
     action = query.data
     
     if action == 'menu_my_report':
-        # This calls the report generation function from another file
         from .reports import generate_my_report
         await generate_my_report(update, context)
     elif action == 'menu_leaderboard':
-        # This calls the leaderboard handler within this same file
         await show_leaderboard_callback_handler(update, context)
     elif action == 'show_private_main_menu':
-        # This calls the start menu handler from start.py
         from .start import show_private_main_menu
         await show_private_main_menu(update, context)
     else:
@@ -34,7 +31,6 @@ async def show_leaderboard_callback_handler(update: Update, context: ContextType
 
     keyboard = [
         [InlineKeyboardButton("信誉分排行榜", callback_data='leaderboard_rep')],
-        # You can add other leaderboard types here in the future
         [InlineKeyboardButton("返回主菜单", callback_data='show_private_main_menu')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -44,7 +40,6 @@ async def show_leaderboard_callback_handler(update: Update, context: ContextType
     if query:
         await query.edit_message_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        # This case is for when it's called not from a button press
         await update.message.reply_text(message_text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def leaderboard_type_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,7 +47,7 @@ async def leaderboard_type_callback_handler(update: Update, context: ContextType
     query = update.callback_query
     await query.answer()
     
-    board_type = query.data.split('_')[1] # e.g., 'rep'
+    board_type = query.data.split('_')[1]
     
     if board_type == 'rep':
         try:
