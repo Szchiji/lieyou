@@ -23,8 +23,6 @@ async def get_leaderboard_text(leaderboard_type: str) -> (str, bool):
     
     query = ""
     if leaderboard_type in ['reputation', 'avoid']:
-        # For reputation, score is sum of weighted recommends and warns
-        # For avoid, it's the same score, but ordered ascendingly
         order = 'DESC' if leaderboard_type == 'reputation' else 'ASC'
         query = f"""
             WITH user_scores AS (
@@ -55,7 +53,7 @@ async def get_leaderboard_text(leaderboard_type: str) -> (str, bool):
             FROM favorites f
             JOIN users u ON f.target_user_pkid = u.pkid
             WHERE u.is_hidden = FALSE
-            GROUP BY u.pkid, u.username
+            GROUP BY u.username
             ORDER BY count DESC
             LIMIT 20;
         """
@@ -68,13 +66,11 @@ async def get_leaderboard_text(leaderboard_type: str) -> (str, bool):
     leaderboard_text = f"{title}\n\n"
     for i, row in enumerate(data):
         score_display = ""
-        if 'score' in row and row['score'] is not None:
+        if 'score' in row:
             score_display = f"声望: {math.ceil(row['score'] * 10)}"
-        elif 'count' in row and row['count'] is not None:
+        elif 'count' in row:
             score_display = f"收藏: {row['count']}"
-        
-        username = row['username'] if row['username'] else f"user_{i+1}"
-        leaderboard_text += f"{i+1}. @{username} - {score_display}\n"
+        leaderboard_text += f"{i+1}. @{row['username']} - {score_display}\n"
         
     return leaderboard_text, True
 
@@ -99,9 +95,9 @@ async def show_leaderboard_callback_handler(update: Update, context: ContextType
     
     if query:
         await query.answer()
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    else: # This case is unlikely with the new menu system but good for fallback
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else: # Called from menu
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def leaderboard_type_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
