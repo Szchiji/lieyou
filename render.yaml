@@ -10,21 +10,19 @@ services:
     startCommand: python main.py
     envVars:
       - key: BOT_TOKEN
-        sync: false           # 控制台中填写
+        sync: false
       - key: ADMIN_USER_ID
-        value: "123456789"    # 替换为你的 Telegram 数字 ID
+        value: "123456789"  # 替换为你的 Telegram 数字 ID
       - key: DATABASE_URL
-        sync: false           # 控制台中填写（Neon URL，必须 ?sslmode=require）
+        sync: false          # 控制台中填写（Neon URL，必须带 ?sslmode=require）
       - key: DB_POOL_MIN
         value: "0"
       - key: DB_POOL_MAX
         value: "8"
       - key: SECRET_TOKEN
-        sync: false           # 控制台中填写（随机长字符串）
+        sync: false          # 控制台中填写（随机长字符串）
       - key: WEBHOOK_PATH
-        value: "/webhook/abc123xyz"   # 可在控制台更改，或留空用默认
-    # 可选健康检查路径（使用 PTB 内置服务器无法自定义路由，故不设置）
-    # healthCheckPath: /health
+        value: "/webhook/abc123xyz"  # 可调整；也可留空使用默认
 
 jobs:
   - type: job
