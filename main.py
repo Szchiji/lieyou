@@ -1,12 +1,30 @@
-import logging
 import asyncio
+import logging
 import os
 from dotenv import load_dotenv
-from telegram import Update, User as TelegramUser, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from telegram.constants import ChatAction, ParseMode
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters
 
-from database import init_db, save_user, get_user
+import database
+from bot_handlers.start import start
+from bot_handlers.common import cancel_action
+from bot_handlers.menu import show_private_main_menu, private_menu_callback_handler
+from bot_handlers.reputation import handle_query, reputation_callback_handler, tag_callback_handler
+from bot_handlers.leaderboard import show_leaderboard_callback_handler, leaderboard_type_callback_handler
+from bot_handlers.report import generate_my_report
+from bot_handlers.admin import (
+    admin_panel, manage_tags_panel, manage_menu_buttons_panel, 
+    user_management_panel, delete_tag_callback, toggle_tag_callback,
+    add_tag_prompt, handle_new_tag, handle_tag_type_selection,
+    prompt_for_username, set_user_hidden_status,
+    TYPING_TAG_NAME, SELECTING_TAG_TYPE, 
+    TYPING_USERNAME_TO_HIDE, TYPING_USERNAME_TO_UNHIDE
+)
+from bot_handlers.broadcast import (
+    prompt_for_broadcast, get_broadcast_content, confirm_broadcast,
+    TYPING_BROADCAST, CONFIRM_BROADCAST
+)
+from bot_handlers.monitoring import run_suspicion_monitor
 
 # Load environment variables
 load_dotenv()
@@ -18,214 +36,141 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get bot token from environment
-TOKEN = os.getenv('BOT_TOKEN')
-if not TOKEN:
-    logger.error("BOT_TOKEN not found in environment variables!")
-    exit(1)
-
-# Get admin user ID
-ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', 0))
-
-# 尝试导入 bot_handlers，如果失败则定义基本功能
-try:
-    from bot_handlers.query_handler import handle_query
-    from bot_handlers.admin import admin_panel, handle_admin_callback
-    from bot_handlers.common import get_user_display_name
-    from bot_handlers.start import start_command
-    # 使用导入的 start_command
-    start = start_command
-except ImportError as e:
-    logger.warning(f"Could not import bot_handlers: {e}")
-    logger.info("Using fallback handlers")
-    
-    # Fallback implementations
-    def get_user_display_name(user):
-        """Get display name for user - safe version."""
-        if hasattr(user, 'username') and user.username:
-            return f"@{user.username}"
-        name = user.first_name or ""
-        if hasattr(user, 'last_name') and user.last_name:
-            name += f" {user.last_name}"
-        return name.strip() or "用户"
-    
-    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a message when the command /start is issued."""
-        user = update.effective_user
-        await save_user(user)
+async def error_handler(update: Update, context):
+    """Handle errors caused by updates."""
+    try:
+        logger.error(f"Exception while handling an update: {context.error}")
         
-        keyboard = [
-            [InlineKeyboardButton("📊 查看排行榜", callback_data="show_leaderboard")],
-            [InlineKeyboardButton("❤️ 我的收藏", callback_data="show_my_favorites")],
-            [InlineKeyboardButton("❓ 帮助", callback_data="show_help")]
-        ]
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # 安全地获取用户显示名，避免特殊字符问题
-        user_name = user.first_name or "用户"
-        # 移除可能导致解析错误的特殊字符
-        user_name = user_name.replace('*', '').replace('_', '').replace('`', '').replace('[', '').replace(']', '')
-        
-        welcome_text = (
-            f"👋 欢迎使用猎友信誉查询机器人，{user_name}！\n\n"
-            "🔍 查询用户：在群组中 @用户名 或转发消息\n"
-            "⭐ 评价用户：点击查询结果下方的按钮\n"
-            "📊 查看排行：点击下方按钮查看信誉排行榜\n\n"
-            "请选择一个操作："
-        )
-        
-        # 不使用 parse_mode 避免解析错误
-        await update.message.reply_text(
-            welcome_text,
-            reply_markup=reply_markup
-        )
-    
-    async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle queries - basic implementation."""
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            
-            if query.data == "show_help":
-                help_text = (
-                    "❓ 帮助信息\n\n"
-                    "查询用户信誉：\n"
-                    "• 在群组中 @用户名\n"
-                    "• 转发用户的消息\n"
-                    "• 回复用户的消息\n\n"
-                    "评价用户：\n"
-                    "• 点击查询结果下方的按钮\n"
-                    "• 选择合适的标签\n\n"
-                    "其他功能：\n"
-                    "• 📊 查看排行榜\n"
-                    "• ❤️ 我的收藏"
+        # 发送用户友好的错误消息
+        if update and update.effective_message:
+            try:
+                # 不使用 parse_mode 避免二次错误
+                await update.effective_message.reply_text(
+                    "❌ 抱歉，处理您的请求时出现错误。请稍后再试。"
                 )
-                await query.edit_message_text(help_text)
-            elif query.data == "show_leaderboard":
-                await query.edit_message_text("📊 排行榜功能开发中...")
-            elif query.data == "show_my_favorites":
-                await query.edit_message_text("❤️ 收藏功能开发中...")
-            else:
-                await query.edit_message_text("功能开发中...")
-        else:
-            # Handle message queries
-            message = update.message
-            if message:
-                await message.reply_text("🔍 查询功能开发中...")
-    
-    async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Admin panel."""
-        user = update.effective_user
-        if user.id != ADMIN_USER_ID:
-            await update.message.reply_text("❌ 您没有权限访问管理面板")
-            return
+            except Exception as e:
+                logger.error(f"Failed to send error message: {e}")
+                
+        # 如果是 callback query，也要 answer 避免加载圈
+        if update and update.callback_query:
+            try:
+                await update.callback_query.answer("出错了，请稍后再试", show_alert=True)
+            except Exception as e:
+                logger.error(f"Failed to answer callback query: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error in error handler: {e}")
+
+async def post_init(application: Application) -> None:
+    """Initialize bot after startup."""
+    try:
+        await database.init_db()
         
-        keyboard = [
-            [InlineKeyboardButton("👥 用户管理", callback_data="admin_users")],
-            [InlineKeyboardButton("🏷️ 标签管理", callback_data="admin_tags")],
-            [InlineKeyboardButton("📊 统计数据", callback_data="admin_stats")]
-        ]
+        # Start background monitoring task
+        asyncio.create_task(run_suspicion_monitor(application.bot))
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("🔧 管理面板", reply_markup=reply_markup)
-    
-    async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle admin callbacks."""
-        query = update.callback_query
-        await query.answer()
-        
-        if query.data == "admin_stats":
-            stats_text = "📊 统计数据\n\n功能开发中..."
-            await query.edit_message_text(stats_text)
-        else:
-            await query.edit_message_text("管理功能开发中...")
+        logger.info("Bot initialization completed!")
+    except Exception as e:
+        logger.error(f"Failed to initialize bot: {e}")
+        raise
 
 def main() -> None:
     """Start the bot."""
-    # Create the Application
-    application = Application.builder().token(TOKEN).build()
+    # 检查必要的环境变量
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        logger.error("BOT_TOKEN not found in environment variables!")
+        return
     
+    # Create the Application
+    application = Application.builder().token(bot_token).post_init(post_init).build()
+
+    # Add error handler
+    application.add_error_handler(error_handler)
+
+    # Command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("myreport", generate_my_report))
+    application.add_handler(CommandHandler("cancel", cancel_action))
+
     # Message handlers
     # Handle @mentions in groups
     application.add_handler(MessageHandler(
-        filters.Entity("mention") & filters.ChatType.GROUPS,
+        filters.MENTION & filters.ChatType.GROUPS, 
         handle_query
     ))
     
-    # Handle forwarded messages in groups
+    # Handle menu button presses in private chats
     application.add_handler(MessageHandler(
-        filters.FORWARDED & filters.ChatType.GROUPS, 
-        handle_query
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+        private_menu_callback_handler
     ))
+
+    # Callback query handlers
+    # Admin panel
+    application.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    application.add_handler(CallbackQueryHandler(manage_tags_panel, pattern="^admin_manage_tags$"))
+    application.add_handler(CallbackQueryHandler(manage_menu_buttons_panel, pattern="^admin_menu_buttons$"))
+    application.add_handler(CallbackQueryHandler(user_management_panel, pattern="^admin_user_management$"))
     
-    # Handle replies in groups
-    application.add_handler(MessageHandler(
-        filters.REPLY & filters.ChatType.GROUPS, 
-        handle_query
-    ))
+    # Tag management
+    application.add_handler(CallbackQueryHandler(delete_tag_callback, pattern="^admin_delete_tag_"))
+    application.add_handler(CallbackQueryHandler(toggle_tag_callback, pattern="^admin_toggle_tag_"))
     
-    # Command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin_panel))
+    # Main menu
+    application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern="^show_private_main_menu$"))
     
-    # Callback query handler
-    application.add_handler(CallbackQueryHandler(handle_admin_callback, pattern="^admin_"))
-    application.add_handler(CallbackQueryHandler(handle_query))
+    # Leaderboard
+    application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern="^show_leaderboard_public$"))
+    application.add_handler(CallbackQueryHandler(leaderboard_type_callback_handler, pattern="^lb_"))
     
-    # Error handler
-    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log Errors caused by Updates."""
-        logger.warning('Update "%s" caused error "%s"', update, context.error)
-        
-        # 通知用户
-        if update and update.effective_message:
-            try:
-                error_message = "❌ 抱歉，处理您的请求时出现错误。请稍后再试。"
-                # 尝试回复，但不使用 parse_mode
-                if update.callback_query:
-                    await update.callback_query.answer(error_message, show_alert=True)
-                else:
-                    await update.effective_message.reply_text(error_message)
-            except Exception as e:
-                logger.error(f"Error sending error message: {e}")
-    
-    application.add_error_handler(error_handler)
-    
-    # Initialize database
-    async def post_init(application: Application) -> None:
-        await init_db()
-        logger.info("Database initialized")
-    
-    # Shutdown handler
-    async def post_shutdown(application: Application) -> None:
-        from database import close_db
-        await close_db()
-        logger.info("Database connection closed")
-    
-    application.post_init = post_init
-    application.post_shutdown = post_shutdown
-    
+    # Reputation
+    application.add_handler(CallbackQueryHandler(reputation_callback_handler, pattern="^rep_"))
+    application.add_handler(CallbackQueryHandler(tag_callback_handler, pattern="^tag_"))
+
+    # Conversation handlers
+    # Tag creation
+    tag_creation_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(add_tag_prompt, pattern="^admin_add_tag_prompt$")],
+        states={
+            TYPING_TAG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_tag)],
+            SELECTING_TAG_TYPE: [CallbackQueryHandler(handle_tag_type_selection, pattern="^tag_type_")]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_action)]
+    )
+    application.add_handler(tag_creation_conv)
+
+    # User hiding/unhiding
+    user_hide_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(prompt_for_username, pattern="^admin_hide_user_prompt$"),
+            CallbackQueryHandler(prompt_for_username, pattern="^admin_unhide_user_prompt$")
+        ],
+        states={
+            TYPING_USERNAME_TO_HIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)],
+            TYPING_USERNAME_TO_UNHIDE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_user_hidden_status)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_action)]
+    )
+    application.add_handler(user_hide_conv)
+
+    # Broadcast
+    broadcast_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(prompt_for_broadcast, pattern="^admin_broadcast$")],
+        states={
+            TYPING_BROADCAST: [MessageHandler(filters.ALL & ~filters.COMMAND, get_broadcast_content)],
+            CONFIRM_BROADCAST: [CallbackQueryHandler(confirm_broadcast, pattern="^broadcast_")]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_action)]
+    )
+    application.add_handler(broadcast_conv)
+
     # Run the bot
     logger.info("Starting bot...")
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True
+        drop_pending_updates=True  # 忽略启动前的消息
     )
 
 if __name__ == '__main__':
-    # Check required environment variables
-    required_vars = ['BOT_TOKEN', 'ADMIN_USER_ID']
-    if os.getenv('DATABASE_URL'):
-        logger.info("Using DATABASE_URL for database connection")
-    else:
-        required_vars.extend(['DB_USER', 'DB_PASSWORD', 'DB_NAME', 'DB_HOST', 'DB_PORT'])
-    
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please check your .env file")
-        exit(1)
-    
-    # Run the bot
     main()
