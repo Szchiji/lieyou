@@ -1,5 +1,5 @@
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler
 import database
 from .admin import check_admin, admin_panel
@@ -38,7 +38,8 @@ async def get_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     await update.message.reply_text(
         "☝️ 这就是您要发送的消息。\n\n**您确定要将此消息广播给所有用户吗？此操作无法撤销！**",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
     return CONFIRM_BROADCAST
 
@@ -94,5 +95,9 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"❌ 发送失败: {failure_count} 人"
     )
     # Send report to the admin who initiated it
-    await context.bot.send_message(chat_id=update.effective_user.id, text=final_report)
+    await context.bot.send_message(
+        chat_id=update.effective_user.id, 
+        text=final_report,
+        parse_mode='Markdown'
+    )
     context.user_data.clear()
