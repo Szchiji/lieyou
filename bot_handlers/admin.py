@@ -96,9 +96,6 @@ async def handle_tag_type_selection(update: Update, context: ContextTypes.DEFAUL
     await query.answer("标签已成功添加！", show_alert=True)
     del context.user_data['new_tag_name']
     
-    # Refresh the manage tags panel
-    # To do this, we need to "re-enter" the admin panel flow correctly
-    # A simple way is to call the panel function
     await query.edit_message_text("返回标签管理...")
     return await manage_tags_panel(update, context)
 
@@ -108,7 +105,6 @@ async def manage_menu_buttons_panel(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     await query.edit_message_text("菜单按钮管理功能正在开发中...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("返回", callback_data='admin_panel')]]))
     return 0
-# ... (other menu button functions would go here)
 async def delete_menu_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int: return 0
 async def toggle_menu_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int: return 0
 async def reorder_menu_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int: return 0
@@ -165,7 +161,7 @@ async def prompt_for_broadcast(update: Update, context: ContextTypes.DEFAULT_TYP
     """Asks the admin for the broadcast message content."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("请输入您想广播的消息内容 (可以是文本、图片、文件等)。\n发送 /cancel 取消。")
+    await query.edit_message_text("请输入您想广播的消息内容 (支持文本、图片、文件等)。\n发送 /cancel 取消。")
     return TYPING_BROADCAST
 
 async def get_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -234,7 +230,6 @@ async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     else:
         await update.message.reply_text("操作已取消。")
     
-    # Clean up any lingering user_data
     keys_to_clear = ['new_tag_name', 'user_action', 'broadcast_message']
     for key in keys_to_clear:
         if key in context.user_data:
