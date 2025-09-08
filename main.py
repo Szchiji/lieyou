@@ -17,7 +17,7 @@ from bot_handlers.leaderboard import show_leaderboard, leaderboard_callback_hand
 from bot_handlers.report import generate_my_report
 from bot_handlers.favorites import favorites_callback_handler
 from bot_handlers.admin import admin_panel, build_admin_conversations
-from bot_handlers.monitoring import monitor_tick, run_monitor_background
+from bot_handlers.monitoring import monitor_tick
 
 from database import init_db, close_db, save_user, promote_virtual_user
 from tools.ensure_schema import ensure_schema
@@ -41,24 +41,16 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     await init_db()
     await ensure_schema()
+    # 仅使用 JobQueue 定时任务；若不可用则禁用监控（不再创建无限循环任务）
     jq = getattr(app, "job_queue", None)
     if jq is not None:
         jq.run_repeating(monitor_tick, interval=300, first=10, name="suspicion_monitor")
         logger.info("JobQueue scheduled suspicion monitor")
     else:
-        # 兜底：JobQueue 不可用时，启用后台任务
-        task = asyncio.create_task(run_monitor_background(app.bot, interval=300))
-        app.bot_data["monitor_task"] = task
-        logger.warning("JobQueue not available; started background monitor task as fallback")
+        logger.warning("JobQueue not available; monitoring disabled")
     logger.info("Bot initialized (webhook mode)")
 
 async def post_shutdown(app: Application):
-    # 取消兜底后台任务（如存在）
-    task = app.bot_data.pop("monitor_task", None)
-    if task:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
     await close_db()
     logger.info("Bot shutdown complete")
 
