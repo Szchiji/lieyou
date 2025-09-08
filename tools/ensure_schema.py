@@ -3,17 +3,14 @@ from database import get_conn
 
 logger = logging.getLogger(__name__)
 
-# 调用时机：在 main.py 的 post_init 里 await ensure_schema()
 async def ensure_schema():
     """
-    自检/自愈数据库结构，兼容旧表(id)与缺列场景。
-    幂等：可多次执行。
+    启动时自检/自愈数据库结构（兼容旧表），幂等可反复执行。
     """
     sql = """
-    -- 统一/修复 users 表结构
+    -- Users 表修复/创建
     DO $$
     BEGIN
-      -- id -> user_id
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_name='users' AND column_name='user_id'
@@ -24,7 +21,6 @@ async def ensure_schema():
         ALTER TABLE users RENAME COLUMN id TO user_id;
       END IF;
 
-      -- 缺 user_id 则添加
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_name='users' AND column_name='user_id'
@@ -42,26 +38,21 @@ async def ensure_schema():
         );
       END IF;
 
-      -- 类型统一 BIGINT
       PERFORM 1
       FROM information_schema.columns
       WHERE table_name='users' AND column_name='user_id' AND data_type='bigint';
       IF NOT FOUND THEN
-        ALTER TABLE users
-          ALTER COLUMN user_id TYPE BIGINT USING user_id::bigint;
+        ALTER TABLE users ALTER COLUMN user_id TYPE BIGINT USING user_id::bigint;
       END IF;
 
-      -- 主键确保
       IF NOT EXISTS (
-        SELECT 1
-        FROM pg_constraint c
+        SELECT 1 FROM pg_constraint c
         JOIN pg_class t ON c.conrelid = t.oid
         WHERE t.relname='users' AND c.contype='p'
       ) THEN
         ALTER TABLE users ADD PRIMARY KEY (user_id);
       END IF;
 
-      -- 列补齐（幂等）
       IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='username') THEN
         ALTER TABLE users ADD COLUMN username TEXT;
       END IF;
@@ -87,7 +78,6 @@ async def ensure_schema():
         ALTER TABLE users ADD COLUMN last_active TIMESTAMPTZ NOT NULL DEFAULT NOW();
       END IF;
 
-      -- username 唯一（若已存在同名约束则跳过）
       IF NOT EXISTS (
         SELECT 1 FROM pg_constraint c
         JOIN pg_class t ON c.conrelid=t.oid
@@ -96,13 +86,12 @@ async def ensure_schema():
         BEGIN
           ALTER TABLE users ADD CONSTRAINT users_username_key UNIQUE (username);
         EXCEPTION WHEN duplicate_table OR unique_violation THEN
-          -- 若存在重复 username，这里会失败；可后续人工清理
           RAISE NOTICE 'Skipped adding unique(users.username) due to duplicates.';
         END;
       END IF;
     END $$;
 
-    -- 其余表：如不存在则创建
+    -- 其它表按需创建
     CREATE TABLE IF NOT EXISTS tags (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
@@ -147,7 +136,6 @@ async def ensure_schema():
     CREATE INDEX IF NOT EXISTS idx_user_queries_req ON user_queries(requester_id);
     CREATE INDEX IF NOT EXISTS idx_user_queries_target ON user_queries(target_user_id);
 
-    -- ratings 终身唯一约束 (rater_id, user_id)
     DO $$
     BEGIN
       IF NOT EXISTS (
@@ -161,7 +149,6 @@ async def ensure_schema():
       END IF;
     END $$;
 
-    -- 虚拟用户序列
     CREATE SEQUENCE IF NOT EXISTS virtual_user_seq START 1 INCREMENT 1;
     """
     async with get_conn() as conn:
