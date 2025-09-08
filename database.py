@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, List, Tuple, Dict, Any
 from datetime import datetime, timezone, timedelta
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("database")
 
 _pool: Optional[asyncpg.Pool] = None
 VALID_USERNAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_"
@@ -140,7 +140,7 @@ async def promote_virtual_user(real_tg_user):
             # ratings
             await conn.execute("UPDATE ratings SET user_id=$1 WHERE user_id=$2", new_id, old_id)
             await conn.execute("UPDATE ratings SET rater_id=$1 WHERE rater_id=$2", new_id, old_id)
-            # 处理 favorites 冲突
+            # favorites 冲突处理
             await conn.execute("""
                 DELETE FROM favorites f
                 WHERE f.user_id=$1 AND EXISTS (
@@ -224,7 +224,8 @@ async def get_or_create_pair_rating(rater_id: int, user_id: int, sentiment: str)
             if row:
                 rid = row["id"]
                 old_s = row["sentiment"]
-                if old_s != sentiment:
+                changed = (old_s != sentiment)
+                if changed:
                     await conn.execute("UPDATE ratings SET sentiment=$1 WHERE id=$2", sentiment, rid)
                     return rid, False, sentiment, True
                 return rid, False, old_s, False
@@ -266,10 +267,7 @@ async def add_favorite(user_id: int, target_user_id: int) -> bool:
     async with get_conn() as conn:
         try:
             await conn.execute(
-                """
-                INSERT INTO favorites (user_id, favorite_user_id)
-                VALUES ($1,$2) ON CONFLICT DO NOTHING
-                """,
+                "INSERT INTO favorites (user_id, favorite_user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
                 user_id, target_user_id
             )
             return True
