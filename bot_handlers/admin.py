@@ -44,9 +44,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query:
         await query.answer()
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 # --- Tag Management ---
 async def manage_tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,7 +70,7 @@ async def manage_tags_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += "\n暂无标签。"
         
     keyboard.append([InlineKeyboardButton("🔙 返回管理面板", callback_data="admin_panel")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def add_tag_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await check_admin(update): return ConversationHandler.END
@@ -110,6 +110,21 @@ async def handle_tag_type_selection(update: Update, context: ContextTypes.DEFAUL
     await manage_tags_panel(update, context)
     return ConversationHandler.END
 
+async def toggle_tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggles a tag's active status."""
+    if not await check_admin(update): return
+    query = update.callback_query
+    tag_pkid = int(query.data.split('_')[3])
+    
+    current_status = await database.db_fetch_val("SELECT is_active FROM tags WHERE pkid = $1", tag_pkid)
+    new_status = not current_status
+    
+    await database.db_execute("UPDATE tags SET is_active = $1 WHERE pkid = $2", new_status, tag_pkid)
+    await query.answer(f"标签已{'激活' if new_status else '禁用'}")
+    
+    query.data = "admin_manage_tags"
+    await manage_tags_panel(update, context)
+
 async def delete_tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_admin(update): return
     query = update.callback_query
@@ -125,7 +140,10 @@ async def manage_menu_buttons_panel(update: Update, context: ContextTypes.DEFAUL
     # This logic is very similar to tag management, omitted for brevity but would include:
     # - Listing buttons with status and reorder arrows
     # - Add, toggle, delete, reorder functionality
-    await update.callback_query.edit_message_text("菜单按钮管理功能正在开发中...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel")]]))
+    await update.callback_query.edit_message_text(
+        "菜单按钮管理功能正在开发中...", 
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 返回", callback_data="admin_panel")]])
+    )
 
 # --- User Management ---
 async def user_management_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,7 +159,8 @@ async def user_management_panel(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     await query.edit_message_text(
         "👤 **用户管理**\n\n进入隐身名单的用户将无法被查询，并从所有排行榜中移除。",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
 async def prompt_for_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -181,7 +200,3 @@ async def set_user_hidden_status(update: Update, context: ContextTypes.DEFAULT_T
     # Can't call user_management_panel directly as it needs a callback_query
     await update.message.reply_text("返回用户管理菜单...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 用户管理", callback_data="admin_user_management")]]))
     return ConversationHandler.END
-
-# Note: The menu button management is complex and has been stubbed for now.
-# Implementing it fully would involve similar ConversationHandlers for adding buttons
-# and callback handlers for reordering, toggling, and deleting.
