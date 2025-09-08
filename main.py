@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, MessageEntity
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters
 
 import database
@@ -94,9 +94,27 @@ def main() -> None:
     application.add_handler(CommandHandler("cancel", cancel_action))
 
     # Message handlers
-    # Handle @mentions in groups
+    # Handle @mentions in groups - 修复这里
     application.add_handler(MessageHandler(
-        filters.MENTION & filters.ChatType.GROUPS, 
+        filters.Entity(MessageEntity.MENTION) & filters.ChatType.GROUPS, 
+        handle_query
+    ))
+    
+    # 也可以处理 text_mention (点击用户名的 mention)
+    application.add_handler(MessageHandler(
+        filters.Entity(MessageEntity.TEXT_MENTION) & filters.ChatType.GROUPS,
+        handle_query
+    ))
+    
+    # Handle forwarded messages in groups
+    application.add_handler(MessageHandler(
+        filters.FORWARDED & filters.ChatType.GROUPS, 
+        handle_query
+    ))
+    
+    # Handle replies in groups
+    application.add_handler(MessageHandler(
+        filters.REPLY & filters.ChatType.GROUPS, 
         handle_query
     ))
     
