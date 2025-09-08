@@ -152,6 +152,7 @@ async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 def build_admin_conversations():
+    # 使用默认 per_message=False，避免 FAQ 警告。该设置可正常处理 MessageHandler 与 CallbackQueryHandler。
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback_router, pattern="^admin_")],
         states={
@@ -169,6 +170,5 @@ def build_admin_conversations():
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
-        map_to_parent={},
-        per_message=True,  # 消除 PTBUserWarning
+        map_to_parent={}
     )
