@@ -2,68 +2,71 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 import database
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 async def generate_my_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generates and shows the user their own reputation report."""
-    query = update.callback_query
-    user_id = update.effective_user.id
-    username = update.effective_user.username or "N/A"
+    """Generates a personal reputation report for the user."""
+    user = update.effective_user
+    user_record = await database.get_user(user.id)
+    if not user_record:
+        await update.message.reply_text("请先使用 /start 与机器人互动，以创建您的档案。")
+        return
 
-    if query:
-        await query.answer()
+    user_pkid = user_record['pkid']
 
-    try:
-        # Get total score
-        score = await database.db_fetch_val(
-            "SELECT SUM(change) FROM reputation_events WHERE target_user_id = $1", user_id
-        ) or 0
+    # 1. Overall Stats
+    overall_stats_query = """
+        SELECT
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend') as recommends,
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'warn') as warns,
+            (SELECT COUNT(*) FROM favorites WHERE target_user_pkid = $1) as favorites
+        FROM users WHERE pkid = $1;
+    """
+    overall_stats = await database.db_fetch_one(overall_stats_query, user_pkid)
 
-        # Get number of upvotes and downvotes received
-        upvotes_received = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM reputation_events WHERE target_user_id = $1 AND change = 1", user_id
-        ) or 0
-        downvotes_received = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM reputation_events WHERE target_user_id = $1 AND change = -1", user_id
-        ) or 0
-        
-        # Get number of upvotes and downvotes given
-        upvotes_given = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM reputation_events WHERE source_user_id = $1 AND change = 1", user_id
-        ) or 0
-        downvotes_given = await database.db_fetch_val(
-            "SELECT COUNT(*) FROM reputation_events WHERE source_user_id = $1 AND change = -1", user_id
-        ) or 0
+    # 2. Activity in the last 30 days
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    last_30_days_query = """
+        SELECT
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'recommend' AND created_at >= $2) as recommends,
+            (SELECT COUNT(*) FROM evaluations WHERE target_user_pkid = $1 AND type = 'warn' AND created_at >= $2) as warns
+    """
+    last_30_days_stats = await database.db_fetch_one(last_30_days_query, user_pkid, thirty_days_ago)
 
-        report_text = (
-            f"📊 *您的个人信誉报告*\n\n"
-            f"👤 用户: @{username}\n"
-            f"⭐️ **总信誉分: {int(score)}**\n\n"
-            f"📈 *收到的评价:*\n"
-            f"  - 👍 收到赞: {upvotes_received} 次\n"
-            f"  - 👎 收到踩: {downvotes_received} 次\n\n"
-            f"📉 *给出的评价:*\n"
-            f"  - 👍 给出赞: {upvotes_given} 次\n"
-            f"  - 👎 给出踩: {downvotes_given} 次"
-        )
-        
-        # Go back to main menu button
-        from .start import show_private_main_menu
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        
-        keyboard = [[InlineKeyboardButton("返回主菜单", callback_data='show_private_main_menu')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    # 3. Top 5 users who recommended you
+    top_recommenders_query = """
+        SELECT u.username, COUNT(e.pkid) as count
+        FROM evaluations e
+        JOIN users u ON e.evaluator_user_pkid = u.pkid
+        WHERE e.target_user_pkid = $1 AND e.type = 'recommend' AND u.is_hidden = FALSE
+        GROUP BY u.username
+        ORDER BY count DESC
+        LIMIT 5;
+    """
+    top_recommenders = await database.db_fetch_all(top_recommenders_query, user_pkid)
 
-        if query:
-            await query.edit_message_text(report_text, reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(report_text, reply_markup=reply_markup, parse_mode='Markdown')
+    # Assemble the report
+    text = f"📊 **您的个人声誉报告, @{user.username}**\n\n"
+    
+    if overall_stats:
+        text += "--- **生涯总览** ---\n"
+        text += f"👍 总推荐: {overall_stats.get('recommends', 0)}\n"
+        text += f"👎 总警告: {overall_stats.get('warns', 0)}\n"
+        text += f"❤️ 总收藏: {overall_stats.get('favorites', 0)}\n\n"
+    
+    if last_30_days_stats:
+        text += "--- **最近30天动态** ---\n"
+        text += f"👍 收到推荐: {last_30_days_stats.get('recommends', 0)}\n"
+        text += f"👎 收到警告: {last_30_days_stats.get('warns', 0)}\n\n"
 
-    except Exception as e:
-        logger.error(f"Error generating report for user {user_id}: {e}", exc_info=True)
-        error_message = "生成报告时发生错误，请稍后再试。"
-        if query:
-            await query.edit_message_text(error_message)
-        else:
-            await update.message.reply_text(error_message)
+    if top_recommenders:
+        text += "--- **您的贵人榜 (Top 5)** ---\n"
+        for i, recommender in enumerate(top_recommenders):
+            text += f"{i+1}. @{recommender['username']} ({recommender['count']}次)\n"
+    else:
+        text += "--- **您的贵人榜 (Top 5)** ---\n"
+        text += "暂时还没有人推荐您哦，多在社区里帮助他人吧！\n"
+
+    await update.message.reply_text(text)
