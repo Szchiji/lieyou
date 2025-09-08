@@ -8,8 +8,7 @@ logger = logging.getLogger(__name__)
 async def reputation_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the +1/-1 button presses."""
     query = update.callback_query
-    await query.answer()
-
+    
     try:
         data = query.data.split('_')
         action = data[1]
@@ -31,16 +30,19 @@ async def reputation_callback_handler(update: Update, context: ContextTypes.DEFA
             """,
             source_user_id, target_user_id, change
         )
+        await query.answer(f"评价成功 ({change:G})")
 
         new_score = await database.db_fetch_val(
             "SELECT SUM(change) FROM reputation_events WHERE target_user_id = $1",
             target_user_id
         ) or 0
 
-        target_user = await context.bot.get_chat_member(query.message.chat.id, target_user_id)
-        text = f"对 @{target_user.user.username} 的评价已更新。\n当前总分: {new_score}"
+        target_user_info = await database.db_fetch_row("SELECT username FROM users WHERE id = $1", target_user_id)
+        target_username = target_user_info['username'] if target_user_info else '未知用户'
+
+        text = f"对 @{target_username} 的评价已更新。\n当前总分: **{new_score}**"
         
-        await query.edit_message_text(text)
+        await query.edit_message_text(text, parse_mode='Markdown')
 
     except Exception as e:
         logger.error(f"Error in reputation callback: {e}", exc_info=True)
@@ -80,7 +82,4 @@ async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
     else:
-        # --- THIS IS THE FIX ---
-        # We simply remove the 'quote=True' argument.
-        # The .reply_text() method quotes the original message by default.
         await update.message.reply_text(f"找不到用户 @{target_username} 或该用户已被管理员隐藏。")
