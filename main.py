@@ -38,13 +38,11 @@ async def main() -> None:
         logger.critical(f"Database initialization failed: {e}. Bot cannot start.", exc_info=True)
         return
 
-    # --- KEY FIX: Build the application with post_shutdown hook ---
-    # The cleanup function is now registered during the build process.
-    # This is the correct, documented way for python-telegram-bot v20+.
+    # --- Build the application with post_shutdown hook ---
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_shutdown(database.close_pool) # Register the async cleanup function here
+        .post_shutdown(database.close_pool)
         .build()
     )
 
@@ -92,20 +90,30 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(show_private_main_menu, pattern=r'^show_private_main_menu$'))
     application.add_handler(CallbackQueryHandler(show_leaderboard_callback_handler, pattern=r'^show_leaderboard_public$'))
 
-    # --- Start Background Tasks ---
-    application.create_task(run_suspicion_monitor(application.bot))
-
-    # --- Run the Bot ---
-    logger.info("Bot is starting polling...")
-    # The run_polling() method is blocking, so the script will stay running.
-    # When the process is stopped, the post_shutdown hook will be called automatically.
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # --- ULTIMATE FIX: Run the Bot with manual lifecycle management ---
+    # This approach is more robust for PaaS environments like Render.
+    try:
+        logger.info("Bot is starting with manual lifecycle management...")
+        async with application:
+            await application.start()
+            await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            logger.info("Bot has started polling successfully.")
+            
+            # Create background task after the application is fully running
+            application.create_task(run_suspicion_monitor(application.bot))
+            
+            # Keep the application running indefinitely
+            await asyncio.Event().wait()
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Shutdown signal received. The application will now stop gracefully.")
+    finally:
+        if application.updater and application.updater.is_running:
+            await application.updater.stop()
+        if application.running:
+            await application.stop()
+        logger.info("Bot has been shut down.")
 
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot shutdown requested by user or system. Exiting gracefully.")
-    except Exception as e:
-        logger.critical(f"Critical error in main execution: {e}", exc_info=True)
+    # The outer try/except is now simpler as the main function handles the lifecycle.
+    asyncio.run(main())
