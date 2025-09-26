@@ -1,3 +1,0 @@
-python-telegram-bot>=20.3,<21.0.0
-asyncpg>=0.29.0
-APScheduler~=3.10.4
