@@ -1,0 +1,21 @@
+-- 仅执行一次，如表已存在，可用 ALTER TABLE 增加 chat_id 字段，参见下方注释
+CREATE TABLE IF NOT EXISTS members (
+    user_id    BIGINT,
+    chat_id    BIGINT,
+    region     TEXT,
+    name       TEXT,
+    name_link  TEXT,
+    channel    TEXT,
+    channel_link TEXT,
+    bust       TEXT,
+    price1     TEXT,
+    price2     TEXT,
+    expire_date DATE,
+    checkins   TEXT[],
+    PRIMARY KEY (user_id, chat_id)
+);
+
+-- 如果你已经有 members 表，请执行
+-- ALTER TABLE members ADD COLUMN chat_id BIGINT;
+-- ALTER TABLE members DROP CONSTRAINT IF EXISTS members_pkey;
+-- ALTER TABLE members ADD PRIMARY KEY (user_id, chat_id);
